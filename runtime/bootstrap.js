@@ -57,6 +57,17 @@ globalThis.__jsg_frame = () => {
 
   const pixels = canvas.data();
   io.present(pixels, WIDTH, HEIGHT);
+
+  // Debug: dump a PNG of frame 20 when requested (visual verification)
+  if (frame === 20 && process.env.JSGAME_DUMP_PNG) {
+    try {
+      const buf = canvas.encodeSync ? canvas.encodeSync('png') : canvas.toBuffer('image/png');
+      require('node:fs').writeFileSync(process.env.JSGAME_DUMP_PNG, buf);
+      log('dumped frame to ' + process.env.JSGAME_DUMP_PNG);
+    } catch (e) {
+      logErr('png dump failed: ' + e.message);
+    }
+  }
 };
 
 globalThis.__jsg_stop = () => {
