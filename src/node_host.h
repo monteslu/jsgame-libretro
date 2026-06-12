@@ -1,0 +1,46 @@
+// node_host.h — libnode embedding for jsgame-libretro
+#ifndef JSG_NODE_HOST_H
+#define JSG_NODE_HOST_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef void (*jsg_log_fn)(int level, const char* msg); // level: 0=debug 1=info 2=warn 3=error
+
+// Start the JS runtime for a piece of content.
+// content_path: full path to the .jsg / .jsgame the frontend loaded.
+// runtime_dir:  directory holding bootstrap.js (dev mode); NULL = embedded runtime.
+// Returns 0 on success.
+int jsg_host_start(const char* content_path, const char* runtime_dir, jsg_log_fn log);
+
+// Run one frame: dispatch rAF, pump libuv. Returns 0 on success.
+int jsg_host_frame(void);
+
+// Framebuffer the JS side last presented (XRGB8888, tightly packed).
+// Returns NULL if nothing presented yet. *width/*height set on success.
+const uint32_t* jsg_host_framebuffer(unsigned* width, unsigned* height);
+
+// Gamepad snapshot written by the core before each frame; read by the JS shim.
+// One entry per port. buttons: bit i = RETRO_DEVICE_ID_JOYPAD_* pressed.
+// axes: lx, ly, rx, ry in [-32768, 32767]. triggers: l2, r2 in [0, 32767].
+typedef struct {
+    uint32_t buttons;
+    int16_t  lx, ly, rx, ry;
+    int16_t  l2, r2;
+    uint8_t  connected;
+} jsg_pad_t;
+
+void jsg_host_set_pads(const jsg_pad_t pads[4]);
+
+// Stop the JS runtime for the current content (environment teardown; V8 stays up).
+void jsg_host_stop(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

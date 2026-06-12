@@ -1,0 +1,26 @@
+# Software Information
+display_name = "JS Game Engine (jsgame)"
+authors = "Luis Montes"
+supported_extensions = "jsg|jsgame"
+corename = "jsgame"
+categories = "Game engine"
+license = "MIT"
+permissions = ""
+display_version = "0.1.0"
+
+# Hardware Information
+manufacturer = "None"
+systemname = "JS Games"
+systemid = "jsgames"
+
+# Libretro Features
+database = ""
+supports_no_game = "false"
+savestate = "false"
+cheats = "false"
+is_experimental = "true"
+
+# BIOS / Firmware
+firmware_count = 0
+
+notes = "Runs JavaScript web games. Content is a .jsg marker file inside a game directory, or a .jsgame zip package."

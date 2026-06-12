@@ -1,0 +1,90 @@
+cmake_minimum_required(VERSION 3.16)
+project(jsgame-libretro C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+
+if(MSVC)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++20>" "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# ─── Dependencies (prebuilt, fetched by scripts/fetch-deps.sh) ───────────
+
+set(LIBNODE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/libnode" CACHE PATH "libnode.a + headers")
+set(LIBCANVAS_A "" CACHE FILEPATH "Path to libcanvas.a (napi-canvas staticlib)")
+set(SKIA_LIB_DIR "" CACHE PATH "Directory with Skia static archives")
+
+if(NOT EXISTS "${LIBNODE_DIR}/libnode.a" AND NOT EXISTS "${LIBNODE_DIR}/libnode.lib")
+    message(FATAL_ERROR "libnode not found at ${LIBNODE_DIR} — run scripts/fetch-deps.sh")
+endif()
+if(NOT EXISTS "${LIBCANVAS_A}")
+    message(FATAL_ERROR "libcanvas.a not found (set -DLIBCANVAS_A=...)")
+endif()
+if(NOT EXISTS "${SKIA_LIB_DIR}/libskia.a")
+    message(FATAL_ERROR "Skia archives not found (set -DSKIA_LIB_DIR=...)")
+endif()
+
+# ─── Core ────────────────────────────────────────────────────────────────
+
+add_library(jsgame_libretro SHARED
+    src/libretro.c
+    src/node_host.cpp
+)
+
+# RetroArch expects "jsgame_libretro.so", not "libjsgame_libretro.so"
+set_target_properties(jsgame_libretro PROPERTIES PREFIX "")
+
+target_include_directories(jsgame_libretro PRIVATE
+    src
+    ${LIBNODE_DIR}/include
+)
+
+# All Skia archives (official build emits many; link as one group)
+file(GLOB SKIA_LIBS "${SKIA_LIB_DIR}/*.a")
+
+if(WIN32)
+    target_link_libraries(jsgame_libretro PRIVATE
+        ${LIBCANVAS_A} ${SKIA_LIBS}
+        ${LIBNODE_DIR}/libnode.lib
+        winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
+elseif(APPLE)
+    target_link_libraries(jsgame_libretro PRIVATE
+        ${LIBCANVAS_A} ${SKIA_LIBS}
+        ${LIBNODE_DIR}/libnode.a pthread dl m c++
+        "-framework CoreFoundation" "-framework Security"
+        "-framework SystemConfiguration" "-framework ApplicationServices")
+else()
+    # Linux: group the canvas/skia/libnode archives to resolve cross-deps.
+    # libc++/libc++abi static: skia + skia_c are built against libc++;
+    # libnode is libstdc++ — both statically linked, symbols localized.
+    find_library(LIBCXX_STATIC c++ PATHS /usr/lib/x86_64-linux-gnu /usr/lib/llvm-19/lib)
+    find_library(LIBCXXABI_STATIC c++abi PATHS /usr/lib/x86_64-linux-gnu /usr/lib/llvm-19/lib)
+    # whole-archive on libcanvas.a: napi-rs registers classes via ctor
+    # initializers in objects nothing references — without this, class
+    # constructors silently vanish ("Class contains no constructor").
+    target_link_libraries(jsgame_libretro PRIVATE
+        -Wl,--whole-archive ${LIBCANVAS_A} -Wl,--no-whole-archive
+        -Wl,--start-group
+        ${SKIA_LIBS}
+        ${LIBNODE_DIR}/libnode.a
+        -Wl,--end-group
+        ${LIBCXX_STATIC} ${LIBCXXABI_STATIC}
+        pthread dl m)
+    target_link_options(jsgame_libretro PRIVATE
+        -Wl,--allow-multiple-definition
+        -Wl,--exclude-libs,ALL   # keep dep symbols out of the dynamic table
+    )
+endif()
+
+if(NOT MSVC)
+    target_compile_options(jsgame_libretro PRIVATE -Wno-unused-parameter -fvisibility=hidden)
+endif()
+
+message(STATUS "")
+message(STATUS "jsgame-libretro:")
+message(STATUS "  libnode:   ${LIBNODE_DIR}")
+message(STATUS "  libcanvas: ${LIBCANVAS_A}")
+message(STATUS "  skia:      ${SKIA_LIB_DIR}")
+message(STATUS "")
