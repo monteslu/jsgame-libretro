@@ -20,7 +20,7 @@ fi
 echo "libnode: $(cat deps/libnode/NODE_VERSION 2>/dev/null || echo '?')"
 
 LIBCANVAS_RELEASE=$(node -p "require('./scripts/versions.json').libcanvas.release")
-if [ "$LIBCANVAS_RELEASE" != "null" ] && [ ! -f deps/libcanvas/libcanvas.a ]; then
+if [ "$LIBCANVAS_RELEASE" != "null" ] && [ ! -f deps/libcanvas/libcanvas.a ] && [ ! -f deps/libcanvas/libcanvas.lib ]; then
     echo "fetching libcanvas $LIBCANVAS_RELEASE ($PLATFORM)..."
     mkdir -p deps/libcanvas
     curl -sL "https://github.com/monteslu/build-libcanvas/releases/download/${LIBCANVAS_RELEASE}/libcanvas-${PLATFORM}.tar.gz" \
