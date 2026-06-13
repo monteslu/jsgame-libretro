@@ -47,6 +47,13 @@ set_source_files_properties(${WEBAUDIO_SRC} src/binding_audio.cpp PROPERTIES
 
 # RetroArch expects "jsgame_libretro.so", not "libjsgame_libretro.so"
 set_target_properties(jsgame_libretro PROPERTIES PREFIX "")
+# Flat output dir (MSVC multi-config otherwise nests under build/Release/);
+# the package/harness steps look in build/ directly.
+foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set_target_properties(jsgame_libretro PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY${cfg} "${CMAKE_BINARY_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY${cfg} "${CMAKE_BINARY_DIR}")
+endforeach()
 
 target_include_directories(jsgame_libretro PRIVATE
     src
@@ -66,12 +73,19 @@ if(WIN32)
 elseif(APPLE)
     # Apple ld: -force_load is the whole-archive equivalent (napi-rs ctor
     # registration objects must all be pulled in)
-    # NOTE: libcanvas.a fully bundles Skia (it whole-archived skia during its
-    # own build) — do NOT also link skia/*.a or Apple ld errors "duplicate
-    # symbol". force_load pulls libcanvas's napi ctors + all of Skia.
+    # libcanvas.a has DUPLICATE object members (napi-rs bundles its link deps).
+    # force_load on the whole archive -> "duplicate symbol" under Apple ld; de-dup
+    # by name drops distinct same-named objects (libavif). So: force_load ONLY the
+    # extracted napi-register object (build.sh sets JSG_NAPI_OBJ), then link
+    # libcanvas.a normally (archive pulls each needed symbol once, dup members OK).
+    set(JSG_NAPI_OBJ "$ENV{JSG_NAPI_OBJ}")
+    if(NOT JSG_NAPI_OBJ)
+        message(FATAL_ERROR "JSG_NAPI_OBJ not set (run via scripts/build.sh on macOS)")
+    endif()
     target_link_libraries(jsgame_libretro PRIVATE
         ${LIBNODE_DIR}/libnode.a pthread dl m c++
-        "-Wl,-force_load,${LIBCANVAS_A}"
+        "-Wl,-force_load,${JSG_NAPI_OBJ}"
+        ${LIBCANVAS_A}
         "-framework CoreFoundation" "-framework Security"
         "-framework SystemConfiguration" "-framework ApplicationServices")
 elseif(ANDROID)

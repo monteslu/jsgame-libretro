@@ -14,26 +14,28 @@ if [ ! -f "$LIBCANVAS_A" ] && [ -f "$PWD/../napi-canvas/target/debug/libcanvas.a
 fi
 
 # libcanvas.a carries duplicate object members (napi-rs bundles its link deps;
-# Linux GNU ld tolerates via --allow-multiple-definition, Apple ld does not —
-# "duplicate symbol"). On macOS, repack a de-duplicated archive.
+# Linux GNU ld tolerates via --allow-multiple-definition; Apple ld does not.
+# Rather than force_load the whole archive (pulls BOTH copies of each dup
+# object -> "duplicate symbol") or de-dup by name (drops distinct same-named
+# objects, e.g. libavif), extract ONLY the object defining the napi register
+# entry, force_load just that, and let the normal archive link pull every
+# other symbol once. CMake reads JSG_NAPI_OBJ for the macOS path.
 if [ "$(uname)" = "Darwin" ] && [ -f "$LIBCANVAS_A" ]; then
-    DEDUP="$PWD/build/libcanvas-dedup.a"
-    mkdir -p "$PWD/build"
-    TMP="$(mktemp -d)"
+    TMP="$PWD/build/napi-extract"
+    rm -rf "$TMP"; mkdir -p "$TMP"
     ( cd "$TMP" && ar x "$LIBCANVAS_A" )
-    rm -f "$DEDUP"
-    # ar with deterministic names; duplicate basenames extracted by ar get
-    # numeric suffixes — collapse to first of each logical object.
-    # exclude macOS's __.SYMDEF* table-of-contents pseudo-members
-    ( cd "$TMP" && ar qcs "$DEDUP" $(ls -1 | grep -vE '^__\.SYMDEF' | sort -u) )
-    LIBCANVAS_A="$DEDUP"
-    rm -rf "$TMP"
+    NAPI_OBJ=""
+    for o in "$TMP"/*.o; do
+        if nm "$o" 2>/dev/null | grep -q 'T _\?napi_register_module_v1'; then NAPI_OBJ="$o"; break; fi
+    done
+    [ -n "$NAPI_OBJ" ] || { echo "FATAL: napi register object not found"; exit 1; }
+    export JSG_NAPI_OBJ="$NAPI_OBJ"
 fi
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
     -DLIBCANVAS_A="$LIBCANVAS_A" \
     -DSKIA_LIB_DIR="$SKIA_LIB_DIR" \
     "$@"
-cmake --build build -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+cmake --build build --config Release -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
 ls -lh build/jsgame_libretro.*
