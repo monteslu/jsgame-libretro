@@ -4,8 +4,7 @@
     "release": "v24.14.1"
   },
   "libcanvas": {
-    "repo": "TBD (build-libcanvas, first release pending)",
-    "release": null,
-    "spike": "../napi-canvas working tree + scripts/patches/napi-canvas-staticlib.patch"
+    "repo": "monteslu/build-libcanvas",
+    "release": "v1.0.0-jsg1"
   }
 }
