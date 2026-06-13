@@ -24,6 +24,12 @@ int jsg_host_frame(void);
 // Returns NULL if nothing presented yet. *width/*height set on success.
 const uint32_t* jsg_host_framebuffer(unsigned* width, unsigned* height);
 
+// Whether the game's display canvas is GL-backed (set by JS each frame). The
+// core presents the HW framebuffer when true, else the software raster — so a
+// game that renders GL offscreen and composites onto a 2D display canvas (or a
+// pure-2D game) presents the correct surface even when a GL context exists.
+bool jsg_host_display_is_gl(void);
+
 // Gamepad snapshot written by the core before each frame; read by the JS shim.
 // One entry per port. buttons: bit i = RETRO_DEVICE_ID_JOYPAD_* pressed.
 // axes: lx, ly, rx, ry in [-32768, 32767]. triggers: l2, r2 in [0, 32767].

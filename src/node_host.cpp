@@ -56,6 +56,12 @@ static uint32_t* g_fb = nullptr;  // XRGB8888, owned here
 static unsigned g_fb_w = 0, g_fb_h = 0;
 static unsigned g_fb_cap = 0;  // allocated pixels
 
+// Whether the canvas the game treats as its screen (realm.displayCanvas) is
+// GL-backed. Set by JS each frame; the core presents the HW framebuffer when
+// true, else the software raster — so a GL-scene-composited-into-2D game (GL
+// offscreen, final image drawn onto a 2D display canvas) presents correctly.
+static bool g_display_is_gl = false;
+
 static jsg_pad_t g_pads[4];
 
 // Keyboard event queue (core enqueues from RETRO_KEYBOARD_CALLBACK; drained
@@ -127,6 +133,18 @@ static napi_value io_present(napi_env env, napi_callback_info info) {
   }
   g_fb_w = w;
   g_fb_h = h;
+  return nullptr;
+}
+
+// setDisplayGL(isGL: boolean) — JS reports whether the display canvas is
+// GL-backed this frame; the core uses it to pick the present path.
+static napi_value io_set_display_gl(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  bool v = false;
+  if (argc >= 1) napi_get_value_bool(env, argv[0], &v);
+  g_display_is_gl = v;
   return nullptr;
 }
 
@@ -230,6 +248,8 @@ static napi_value io_register(napi_env env, napi_value exports) {
   napi_value fn;
   napi_create_function(env, "present", NAPI_AUTO_LENGTH, io_present, nullptr, &fn);
   napi_set_named_property(env, exports, "present", fn);
+  napi_create_function(env, "setDisplayGL", NAPI_AUTO_LENGTH, io_set_display_gl, nullptr, &fn);
+  napi_set_named_property(env, exports, "setDisplayGL", fn);
   napi_create_function(env, "log", NAPI_AUTO_LENGTH, io_log, nullptr, &fn);
   napi_set_named_property(env, exports, "log", fn);
   napi_create_function(env, "getPads", NAPI_AUTO_LENGTH, io_get_pads, nullptr, &fn);
@@ -433,6 +453,8 @@ extern "C" const uint32_t* jsg_host_framebuffer(unsigned* width, unsigned* heigh
   *height = g_fb_h;
   return g_fb;
 }
+
+extern "C" bool jsg_host_display_is_gl(void) { return g_display_is_gl; }
 
 extern "C" void jsg_host_key_event(int down, const char* code, const char* key) {
   if (g_keyq_count >= JSG_KEY_QUEUE) return;

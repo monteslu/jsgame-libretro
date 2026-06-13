@@ -9,6 +9,7 @@
 #include "libretro.h"
 #include "node_host.h"
 #include "embedded_runtime.h"
+#include "gl_detect.h"
 
 #define JSG_VERSION "0.1.0"
 #define DEFAULT_WIDTH 640
@@ -212,7 +213,12 @@ RETRO_API void retro_run(void) {
 
     jsg_host_frame();
 
-    if (gl_active && jsg_gl_ready()) {
+    // Present the HW framebuffer only when the GL context is live AND the
+    // game's DISPLAY canvas is the GL one. A game can render GL into an
+    // offscreen canvas and composite the final image onto a 2D display canvas
+    // (with a HUD on top) — then the final pixels live in the software raster,
+    // not the GL FBO, so we fall through to the framebuffer path below.
+    if (gl_active && jsg_gl_ready() && jsg_host_display_is_gl()) {
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
         if (!async_audio) {
             const int16_t* gl_samples = NULL;
@@ -258,19 +264,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
 
-    // GL is opt-in per game: the .jsg marker (or JSGAME_GL env for dev) declares
-    // it via {"webgl":true}. We must decide BEFORE bootstrap runs (the HW
-    // context is requested here, in retro_load_game). 2D games skip GL so the
-    // frontend keeps the software framebuffer path.
-    bool wants_gl = getenv("JSGAME_GL") != NULL;
-    if (!wants_gl) {
-        FILE* mf = fopen(game->path, "rb");
-        if (mf) {
-            char mbuf[512]; size_t n = fread(mbuf, 1, sizeof(mbuf) - 1, mf); fclose(mf);
-            mbuf[n] = 0;
-            if (strstr(mbuf, "\"webgl\"") && strstr(mbuf, "true")) wants_gl = true;
-        }
-    }
+    // GL is per-game and must be decided BEFORE bootstrap runs (the HW context
+    // is requested here, in retro_load_game — by the time the game calls
+    // getContext('webgl2') it's too late to ask the frontend). We predict it by
+    // scanning the game's own source for a webgl getContext call (multi-canvas
+    // safe; no author-facing config). JSGAME_GL=1 forces it on for a rare miss.
+    // 2D-only games skip GL so the frontend keeps the software framebuffer path.
+    bool wants_gl = getenv("JSGAME_GL") != NULL || jsg_game_wants_gl(game->path);
     if (wants_gl) {
         // Ask the frontend which GL API it provides (GET_PREFERRED_HW_RENDER),
         // rather than guessing per-target. Our WebGL2 binding (gl_bindings.cpp)

@@ -71,6 +71,7 @@ add_library(jsgame_libretro SHARED
     src/gl/gl_bindings.cpp
     src/binding_audio.cpp
     src/runtime_unzip.c
+    src/gl_detect.c
     src/vendor/miniz.c
     "${EMBEDDED_RUNTIME_C}"
     ${WEBAUDIO_SRC}

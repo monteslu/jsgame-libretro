@@ -20,16 +20,27 @@ const { buildRealm } = require('./realm.js');
 const contentPath = globalThis.__jsg_paths.content;
 const content = createContent(contentPath);
 
-// Optional per-game config in the .jsg/.jsgame (JSON: {width, height})
+// package.json is the manifest (entry = its "main", resolved in content.js).
+// Sizing/network are OPTIONAL and default sensibly — no config field required.
+// Overrides may live in a "jsgame" block in package.json, or in the .jsg marker
+// (which is otherwise an empty pointer, like ScummVM's .scummvm). Marker wins.
 let width = 640, height = 480;
-let netPolicy = 'off';  // off | websocket | full
-try {
-  const marker = require('node:fs').readFileSync(contentPath, 'utf8');
-  const cfg = JSON.parse(marker);
+let netPolicy = 'off';  // off | websocket | full (sandbox default; opt in per game)
+function applyCfg(cfg) {
+  if (!cfg || typeof cfg !== 'object') return;
   if (cfg.width > 0 && cfg.width <= 1920) width = cfg.width | 0;
   if (cfg.height > 0 && cfg.height <= 1080) height = cfg.height | 0;
   if (cfg.network) netPolicy = String(cfg.network);
-} catch { /* empty/non-JSON marker = defaults */ }
+}
+try {
+  const pkg = content.read('package.json');
+  if (pkg) applyCfg(JSON.parse(pkg.toString()).jsgame);
+} catch { /* no/invalid package.json jsgame block = defaults */ }
+try {
+  // Dir mode: contentPath is the .jsg marker; it may hold override JSON.
+  // Zip mode: contentPath is the .jsgame archive — not JSON, falls to catch.
+  applyCfg(JSON.parse(require('node:fs').readFileSync(contentPath, 'utf8')));
+} catch { /* empty/non-JSON marker = keep package.json/defaults */ }
 
 log(`content: ${content.name} (${width}x${height})`);
 
@@ -79,8 +90,15 @@ globalThis.__jsg_frame = () => {
   if (audio) io.pushAudio(audio);
   const t2 = hostPerf.now();
 
+  // Present the canvas the game treats as its screen. If that canvas is
+  // GL-backed, the game rendered into the HW framebuffer — tell the core to
+  // present that. Otherwise it's a software (Skia) raster, so hand over the
+  // pixels — even if a GL context exists on some OTHER (offscreen) canvas that
+  // the game composited from. The display canvas is the source of truth.
   const canvas = realm.displayCanvas;
-  io.present(canvas.data(), canvas.width, canvas.height);
+  const displayIsGL = !!canvas._isWebGL;
+  if (io.setDisplayGL) io.setDisplayGL(displayIsGL);
+  if (!displayIsGL) io.present(canvas.data(), canvas.width, canvas.height);
   const t3 = hostPerf.now();
 
   tCb += t1 - t0; tAudio += t2 - t1; tPresent += t3 - t2;

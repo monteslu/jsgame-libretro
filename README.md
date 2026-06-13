@@ -23,15 +23,30 @@ See `PLAN.md` for the full design.
 
 ## Content
 
+A game is a normal web game folder with a `package.json`. The frontend needs a
+file extension to scan (libretro/EmulationStation match content by extension,
+never by a bare filename or folder), so a tiny marker carries that extension:
+
 | Mode | What the frontend loads |
 |---|---|
-| Directory (dev) | the `.jsg` marker file inside the game directory |
-| Zip (distribution) | a `.jsgame` archive of the same tree |
+| Directory (dev) | a `.jsg` marker file inside the game folder |
+| Zip (distribution) | a `.jsgame` archive of the same folder |
 
-A game is a normal web game tree: entry resolved from `package.json` `main`,
-then `main.js`, `src/main.js`, `index.js`, `src/index.js`, `game.js`,
-`src/game.js`. Bundle your game — bare specifiers are not resolved. Static
-assets in `public/` are addressed from the root, vite-style.
+The `.jsg` marker is just a pointer — an empty file is fine (same idea as
+ScummVM's `.scummvm` hook file). Everything else is derived from the folder:
+
+- **Entry**: `package.json` `main`, then `main.js`, `src/main.js`, `index.js`,
+  `src/index.js`, `game.js`, `src/game.js`. Bundle your game — bare specifiers
+  are not resolved. Static assets in `public/` are addressed from the root,
+  vite-style.
+- **GPU**: WebGL use is auto-detected by scanning the game's source for a
+  `getContext('webgl'|'webgl2')` call (the core must request the GPU context
+  before any game code runs, so it can't wait for the call). `JSGAME_GL=1`
+  forces it on if a game obtains the context through an indirection the scan
+  can't see.
+- **Optional config** (`width`, `height`, `network`): a `"jsgame"` block in
+  `package.json` (or JSON in the `.jsg` marker, which wins). All optional —
+  sensible defaults otherwise.
 
 ## Browser APIs
 
@@ -47,7 +62,7 @@ a game that runs there is the target for running here unchanged.
 | LocalStorage | ✅ | backed by libretro SRAM (frontends persist as `.srm`) |
 | WebAssembly | ✅ | runs in V8, in the game realm and workers |
 | `fetch` / `Image` | ✅ | game-root scoped (dir or zip); HTTP off by default |
-| WebGL2 / Canvas 3D | ✅ | full `WebGL2RenderingContext` (Skia-free GLES3 path); auto-enabled by `{"webgl":true}` in the `.jsg`; desktop via ANGLE |
+| WebGL2 / Canvas 3D | ✅ | full `WebGL2RenderingContext` (Skia-free GLES3 path); GPU use is auto-detected from the game's `getContext('webgl')` calls (no config field); desktop via ANGLE |
 | Web Workers | ✅ | `worker_threads`-backed; curated worker realm; `SharedArrayBuffer`/`Atomics` |
 | Keyboard events | ✅ | `keydown`/`keyup` with `key`/`code` (frontend keyboard → realm) |
 | WebSockets | ✅ | privileged-realm socket + game façade; gated by `network` in the `.jsg` (`off`/`websocket`/`full`) |

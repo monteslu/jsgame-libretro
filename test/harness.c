@@ -208,9 +208,29 @@ int main(int argc, char** argv) {
     if (g_dump) fclose(g_dump);
 #ifdef JSG_GL
     printf("gl center pixel: %06X\n", g_gl_center);
-    printf(g_gl_center ? "PASS\n" : "FAIL: gl center black\n");
+    if (g_gl_center) {
+        // GL framebuffer was presented (GL-is-final game): GL path verified.
+        printf("PASS\n");
+        retro_unload_game(); retro_deinit();
+        return 0;
+    }
+    // No GL frame presented though a GL context was granted: the game composited
+    // onto a 2D display canvas, so the core should have presented the software
+    // raster. Verify the diagnostic bars came through the software path.
+    if (g_fb && g_fb_w) {
+        uint32_t gr = g_fb[80 * g_fb_w + 100] & 0xFFFFFF;
+        uint32_t gg = g_fb[80 * g_fb_w + 260] & 0xFFFFFF;
+        uint32_t gb = g_fb[80 * g_fb_w + 420] & 0xFFFFFF;
+        printf("software bars: red=%06X green=%06X blue=%06X\n", gr, gg, gb);
+        int sok = (gr == 0xFF0000) && (gg == 0x00FF00) && (gb == 0x0000FF);
+        printf(sok ? "PASS (2D display presented, GL granted but offscreen)\n"
+                   : "FAIL: GL black and software bars wrong\n");
+        retro_unload_game(); retro_deinit();
+        return sok ? 0 : 1;
+    }
+    printf("FAIL: gl center black and no software framebuffer\n");
     retro_unload_game(); retro_deinit();
-    return g_gl_center ? 0 : 1;
+    return 1;
 #endif
 
     if (!g_fb || g_fb_w == 0) {
