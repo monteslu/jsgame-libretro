@@ -71,7 +71,9 @@ jobs:
         if: matrix.harness
         shell: bash
         run: |
-          cc -o test/harness test/harness.c -ldl
+          # macOS dlopen/dlsym live in libc — no -ldl there
+          if [ "$RUNNER_OS" = "macOS" ]; then cc -o test/harness test/harness.c;
+          else cc -o test/harness test/harness.c -ldl; fi
           JSGAME_RUNTIME_DIR=$PWD/runtime ./test/harness \
             build/${{ matrix.lib }} test-games/s2-demo/s2-demo.jsg 60
 
