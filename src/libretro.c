@@ -214,28 +214,37 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
     // S5 spike: opt-in GL via env; Phase 3 negotiates per-game.
     if (getenv("JSGAME_GL")) {
-        // Try GLES3 (handhelds, RetroDeck), then desktop GL core 3.3
-        // (desktop RetroArch is often built against desktop GL, not GLES).
-        unsigned ctx_types[2] = { RETRO_HW_CONTEXT_OPENGLES3, RETRO_HW_CONTEXT_OPENGL_CORE };
-        const char* ctx_names[2] = { "GLES3", "GL core 3.3" };
-        for (int i = 0; i < 2 && !gl_active; i++) {
+        // Ask the frontend which GL API it provides (GET_PREFERRED_HW_RENDER),
+        // rather than guessing per-target. Our WebGL2 binding (gl_bindings.cpp)
+        // speaks GLES3 only — it calls GLES entry points (glClearDepthf,
+        // glReleaseShaderCompiler, precision formats) absent on desktop GL-core,
+        // so we can run ONLY on a GLES-family context. Android & handhelds are
+        // native GLES3; a desktop frontend must offer GLES3 (e.g. via ANGLE).
+        enum retro_hw_context_type pref = RETRO_HW_CONTEXT_NONE;
+        bool flexible = environ_cb(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER, &pref);
+        bool gles_ok = flexible
+            || pref == RETRO_HW_CONTEXT_OPENGLES3
+            || pref == RETRO_HW_CONTEXT_OPENGLES_VERSION
+            || pref == RETRO_HW_CONTEXT_OPENGLES2;
+        core_log(RETRO_LOG_INFO, "preferred HW render: %d (frontend flexible=%d)", (int)pref, (int)flexible);
+        if (gles_ok) {
             memset(&hw_render, 0, sizeof(hw_render));
-            hw_render.context_type = ctx_types[i];
+            hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
             hw_render.context_reset = context_reset;
             hw_render.context_destroy = context_destroy;
             hw_render.depth = true;
             hw_render.stencil = true;
             hw_render.bottom_left_origin = true;
-            if (ctx_types[i] == RETRO_HW_CONTEXT_OPENGL_CORE) {
-                hw_render.version_major = 3;
-                hw_render.version_minor = 3;
-            }
             if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
                 gl_active = true;
-                core_log(RETRO_LOG_INFO, "HW render (%s) negotiated", ctx_names[i]);
+                core_log(RETRO_LOG_INFO, "HW render (GLES3) negotiated");
             }
         }
-        if (!gl_active) core_log(RETRO_LOG_WARN, "no GL context; staying software");
+        if (!gl_active) {
+            core_log(RETRO_LOG_WARN,
+                "no GLES3 context available; GL games unavailable on this "
+                "frontend (desktop-GL-only — needs a GLES3/ANGLE build)");
+        }
     }
 
     const char* runtime_dir = getenv("JSGAME_RUNTIME_DIR");  // dev mode
