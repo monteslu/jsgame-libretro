@@ -26,6 +26,39 @@ if(NOT EXISTS "${SKIA_LIB_DIR}/libskia.a" AND NOT EXISTS "${SKIA_LIB_DIR}/skia.l
     message(FATAL_ERROR "Skia archives not found (set -DSKIA_LIB_DIR=...)")
 endif()
 
+# ─── Embedded runtime blob ───────────────────────────────────────────────
+# Zip runtime/ at build time and embed it as a C byte array so the released
+# .so is self-contained (no JSGAME_RUNTIME_DIR). The core extracts it to a
+# temp dir on first load (src/runtime_unzip.c). Edits to runtime/ files
+# retrigger via DEPENDS; newly ADDED files retrigger via CONFIGURE_DEPENDS.
+find_program(NODE_EXECUTABLE node REQUIRED)
+find_program(ZIP_EXECUTABLE zip REQUIRED)
+
+file(GLOB_RECURSE RUNTIME_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/*")
+set(RUNTIME_ZIP "${CMAKE_BINARY_DIR}/runtime.zip")
+set(EMBEDDED_RUNTIME_C "${CMAKE_BINARY_DIR}/embedded_runtime.c")
+
+add_custom_command(
+    OUTPUT "${RUNTIME_ZIP}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${RUNTIME_ZIP}"
+    COMMAND "${ZIP_EXECUTABLE}" -r -X -q "${RUNTIME_ZIP}" .
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/runtime"
+    DEPENDS ${RUNTIME_FILES}
+    COMMENT "Zipping runtime/ -> runtime.zip"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT "${EMBEDDED_RUNTIME_C}"
+    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bin2c.js"
+            "${RUNTIME_ZIP}" "${EMBEDDED_RUNTIME_C}" jsg_runtime_zip
+    DEPENDS "${RUNTIME_ZIP}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bin2c.js"
+    COMMENT "Generating embedded_runtime.c from runtime.zip"
+    VERBATIM)
+
+set_source_files_properties("${EMBEDDED_RUNTIME_C}" PROPERTIES GENERATED TRUE)
+# Explicit anchor so multi-config generators (Xcode/VS) order codegen first.
+add_custom_target(jsg_runtime_blob DEPENDS "${EMBEDDED_RUNTIME_C}")
+
 # ─── Core ────────────────────────────────────────────────────────────────
 
 file(GLOB WEBAUDIO_SRC src/webaudio/*.cpp src/webaudio/nodes/*.cpp src/webaudio/utils/*.cpp)
@@ -37,8 +70,18 @@ add_library(jsgame_libretro SHARED
     src/gl/binding_gl_full.cpp
     src/gl/gl_bindings.cpp
     src/binding_audio.cpp
+    src/runtime_unzip.c
+    src/vendor/miniz.c
+    "${EMBEDDED_RUNTIME_C}"
     ${WEBAUDIO_SRC}
 )
+add_dependencies(jsgame_libretro jsg_runtime_blob)
+
+# miniz: expose ONLY the mz_zip_reader_* surface. MINIZ_NO_ZLIB_APIS drops the
+# zlib-compatible names (compress/inflate/crc32/...) that would otherwise add to
+# libnode's bundled-zlib dup-symbol pile; NO_ARCHIVE_WRITING_APIS — we read only.
+set_source_files_properties(src/vendor/miniz.c PROPERTIES
+    COMPILE_DEFINITIONS "MINIZ_NO_ZLIB_APIS;MINIZ_NO_ARCHIVE_WRITING_APIS")
 # vendored decoder headers (uaac AAC tables) trip gcc's C++ narrowing errors
 if(NOT MSVC)
     set_source_files_properties(src/webaudio/audio_decoders.cpp PROPERTIES COMPILE_OPTIONS "-Wno-narrowing")

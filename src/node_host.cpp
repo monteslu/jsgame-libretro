@@ -307,7 +307,8 @@ extern "C" int jsg_host_start(const char* content_path, const char* runtime_dir,
     node::AddLinkedBinding(g_env, "jsgame_audio", jsg_audio_register);
 
     // Trampoline: stash paths, then load bootstrap.js via createRequire.
-    // TODO(embedded runtime): incbin runtime.zip; for now runtime_dir required.
+    // runtime_dir is either $JSGAME_RUNTIME_DIR (dev) or the temp dir the core
+    // extracted the embedded runtime zip into (release) — same code path.
     std::string boot =
         "globalThis.__jsg_paths = { content: " +
         std::string("JSON.parse(process.env.JSGAME_ARGS_JSON).content, runtime: "

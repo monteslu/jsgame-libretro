@@ -73,14 +73,16 @@ JSGAME_RUNTIME_DIR=$PWD/runtime ./test/harness \
   build/jsgame_libretro.so test-games/s2-demo/s2-demo.jsg 60
 ```
 
-`JSGAME_RUNTIME_DIR` points at `runtime/` for development (edit JS, relaunch, no
-C rebuild). Set `JSGAME_DUMP_PNG=/path.png JSGAME_DUMP_FRAME=25` to capture a
-frame.
+The JS runtime is embedded in the core, so the built `.so` runs standalone.
+`JSGAME_RUNTIME_DIR` is an optional dev override: point it at `runtime/` to load
+the JS from disk (edit JS, relaunch, no C rebuild). Set
+`JSGAME_DUMP_PNG=/path.png JSGAME_DUMP_FRAME=25` to capture a frame.
 
 ## Install (RetroArch)
 
 Copy `jsgame_libretro.so` and `jsgame_libretro.info` into your frontend's cores
-directory, put games in a `jsgames` roms folder, point the frontend at them.
+directory, put games in a `jsgames` roms folder, point the frontend at them. The
+core is self-contained — no env vars needed.
 Release builds: [Releases](https://github.com/monteslu/jsgame-libretro/releases).
 
 ## License

@@ -8,6 +8,7 @@
 
 #include "libretro.h"
 #include "node_host.h"
+#include "embedded_runtime.h"
 
 #define JSG_VERSION "0.1.0"
 #define DEFAULT_WIDTH 640
@@ -304,11 +305,15 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
     }
 
-    const char* runtime_dir = getenv("JSGAME_RUNTIME_DIR");  // dev mode
+    const char* runtime_dir = getenv("JSGAME_RUNTIME_DIR");  // dev override
     if (!runtime_dir) {
-        core_log(RETRO_LOG_ERROR,
-                 "JSGAME_RUNTIME_DIR not set (embedded runtime not wired yet)");
-        return false;
+        runtime_dir = jsg_extract_embedded_runtime();  // self-contained release
+        if (!runtime_dir) {
+            core_log(RETRO_LOG_ERROR,
+                     "embedded runtime extraction failed and JSGAME_RUNTIME_DIR unset");
+            return false;
+        }
+        core_log(RETRO_LOG_INFO, "using embedded runtime at %s", runtime_dir);
     }
 
     struct retro_audio_callback audio_cb_desc = { audio_callback, audio_set_state };
