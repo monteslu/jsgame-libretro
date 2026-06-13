@@ -45,8 +45,12 @@ static void video_cb(const void* data, unsigned width, unsigned height, size_t p
     g_fb_h = height;
 }
 
+static int16_t g_audio_peak;
 static size_t audio_batch_cb(const int16_t* data, size_t frames) {
-    (void)data;
+    for (size_t i = 0; data && i < frames * 2; i++) {
+        int16_t v = data[i] < 0 ? -data[i] : data[i];
+        if (v > g_audio_peak) g_audio_peak = v;
+    }
     g_audio_frames += frames;
     return frames;
 }
@@ -123,7 +127,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "FAIL: no framebuffer presented after 30 frames\n");
         return 1;
     }
-    printf("framebuffer: %ux%u, audio frames: %zu\n", g_fb_w, g_fb_h, g_audio_frames);
+    printf("framebuffer: %ux%u, audio frames: %zu, audio peak: %d\n", g_fb_w, g_fb_h, g_audio_frames, g_audio_peak);
 
     // Diagnostic bars from bootstrap.js: red @ (100,80), green @ (260,80), blue @ (420,80)
     uint32_t red = g_fb[80 * g_fb_w + 100] & 0xFFFFFF;

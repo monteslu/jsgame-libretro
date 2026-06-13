@@ -51,6 +51,10 @@ static jsg_pad_t g_pads[4];
 static uint8_t* g_sram = nullptr;
 static size_t g_sram_size = 0;
 
+#define JSG_MAX_AUDIO_FRAMES 4096
+static int16_t g_audio[JSG_MAX_AUDIO_FRAMES * 2];
+static size_t g_audio_frames = 0;  // frames pushed this video frame
+
 static void logmsg(int level, const char* msg) {
   if (g_log) g_log(level, msg);
 }
@@ -137,6 +141,26 @@ static napi_value io_get_pads(napi_env env, napi_callback_info info) {
   return ta;
 }
 
+// pushAudio(samples: Int16Array) — interleaved stereo for THIS video frame
+static napi_value io_push_audio(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  if (argc < 1) return nullptr;
+  void* data = nullptr;
+  size_t len = 0;
+  napi_typedarray_type type;
+  napi_value ab;
+  size_t offset;
+  napi_get_typedarray_info(env, argv[0], &type, &len, &data, &ab, &offset);
+  if (!data || type != napi_int16_array) return nullptr;
+  size_t frames = len / 2;
+  if (frames > JSG_MAX_AUDIO_FRAMES) frames = JSG_MAX_AUDIO_FRAMES;
+  memcpy(g_audio, data, frames * 2 * sizeof(int16_t));
+  g_audio_frames = frames;
+  return nullptr;
+}
+
 // sramRead() -> Uint8Array copy of the SRAM region (or null)
 static napi_value io_sram_read(napi_env env, napi_callback_info info) {
   (void)info;
@@ -177,6 +201,8 @@ static napi_value io_register(napi_env env, napi_value exports) {
   napi_set_named_property(env, exports, "sramRead", fn);
   napi_create_function(env, "sramWrite", NAPI_AUTO_LENGTH, io_sram_write, nullptr, &fn);
   napi_set_named_property(env, exports, "sramWrite", fn);
+  napi_create_function(env, "pushAudio", NAPI_AUTO_LENGTH, io_push_audio, nullptr, &fn);
+  napi_set_named_property(env, exports, "pushAudio", fn);
   return exports;
 }
 
@@ -312,7 +338,11 @@ extern "C" int jsg_host_frame(void) {
     }
   }
 
+  // Full embedder pump: libuv callbacks, V8 platform tasks (ESM loading, WASM
+  // compile), then microtasks. uv_run alone leaves import() pending forever.
   uv_run(g_setup->event_loop(), UV_RUN_NOWAIT);
+  g_platform->DrainTasks(g_isolate);
+  g_isolate->PerformMicrotaskCheckpoint();
   return 0;
 }
 
@@ -330,6 +360,13 @@ extern "C" void jsg_host_set_pads(const jsg_pad_t pads[4]) {
 extern "C" void jsg_host_set_sram(uint8_t* sram, size_t size) {
   g_sram = sram;
   g_sram_size = size;
+}
+
+extern "C" size_t jsg_host_audio(const int16_t** samples) {
+  *samples = g_audio;
+  size_t frames = g_audio_frames;
+  g_audio_frames = 0;  // consumed; absent a push next frame we emit silence
+  return frames;
 }
 
 extern "C" void jsg_host_stop(void) {

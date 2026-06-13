@@ -33,15 +33,26 @@ log(`content: ${content.name} (${width}x${height})`);
 
 const realm = buildRealm({ content, io, canvasLib, width, height, log, logErr });
 
+const FRAMES_PER_TICK = 800; // 48000 / 60
+
 const entry = resolveEntry(content);
 if (!entry) {
   logErr('no game entry found (package.json main / main.js / src/main.js / ...)');
 } else {
   log('entry: ' + entry);
-  realm.runEntry(entry).then(
-    () => log('entry evaluated'),
-    (err) => logErr('entry failed: ' + (err && err.stack ? err.stack : String(err)))
-  );
+  // Real WebAudio first (ESM vendor; engine is WASM running in this V8) so a
+  // game constructing AudioContext at boot gets the real engine, not the stub.
+  import('./vendor/webaudio/LibretroAudioContext.js')
+    .then((m) => {
+      realm.setAudioContextClass(m.LibretroAudioContext);
+      log('webaudio engine ready');
+    })
+    .catch((e) => logErr('webaudio init failed (stub stays): ' + e.message))
+    .then(() => realm.runEntry(entry))
+    .then(
+      () => log('entry evaluated'),
+      (err) => logErr('entry failed: ' + (err && err.stack ? err.stack : String(err)))
+    );
 }
 
 let frame = 0;
@@ -49,6 +60,9 @@ let frame = 0;
 globalThis.__jsg_frame = () => {
   frame++;
   realm.fireFrame(io.getPads());
+
+  const audio = realm.pullAudio(FRAMES_PER_TICK);
+  if (audio) io.pushAudio(audio);
 
   const canvas = realm.displayCanvas;
   io.present(canvas.data(), canvas.width, canvas.height);

@@ -1,0 +1,70 @@
+import { AudioNode } from '../AudioNode.js';
+
+export class IIRFilterNode extends AudioNode {
+    constructor(context, options) {
+        if (!options || !options.feedforward || !options.feedback) {
+            throw new TypeError('IIRFilterNode requires feedforward and feedback coefficients');
+        }
+
+        if (options.feedforward.length === 0 || options.feedforward.length > 20) {
+            throw new Error('feedforward must have length between 1 and 20');
+        }
+
+        if (options.feedback.length === 0 || options.feedback.length > 20) {
+            throw new Error('feedback must have length between 1 and 20');
+        }
+
+        if (options.feedback[0] === 0) {
+            throw new Error('feedback[0] cannot be 0');
+        }
+
+        const nodeId = context._engine.createNode('IIRFilter', {
+            ...options,
+            feedforward: Array.from(options.feedforward),
+            feedback: Array.from(options.feedback)
+        });
+        super(context, nodeId);
+
+        this.numberOfInputs = 1;
+        this.numberOfOutputs = 1;
+
+        this._feedforward = Array.from(options.feedforward);
+        this._feedback = Array.from(options.feedback);
+
+        // Set the coefficients in WASM
+        context._engine.setIIRFilterCoefficients(nodeId, this._feedforward, this._feedback);
+
+        // Apply channel config from options
+        if (options.channelCount !== undefined) this.channelCount = options.channelCount;
+        if (options.channelCountMode !== undefined)
+            this.channelCountMode = options.channelCountMode;
+        if (options.channelInterpretation !== undefined)
+            this.channelInterpretation = options.channelInterpretation;
+    }
+
+    getFrequencyResponse(frequencyHz, magResponse, phaseResponse) {
+        if (!(frequencyHz instanceof Float32Array)) {
+            throw new TypeError('frequencyHz must be a Float32Array');
+        }
+        if (!(magResponse instanceof Float32Array)) {
+            throw new TypeError('magResponse must be a Float32Array');
+        }
+        if (!(phaseResponse instanceof Float32Array)) {
+            throw new TypeError('phaseResponse must be a Float32Array');
+        }
+
+        if (
+            frequencyHz.length !== magResponse.length ||
+            frequencyHz.length !== phaseResponse.length
+        ) {
+            throw new Error('All arrays must have the same length');
+        }
+
+        this.context._engine.getIIRFilterFrequencyResponse(
+            this._nodeId,
+            frequencyHz,
+            magResponse,
+            phaseResponse
+        );
+    }
+}

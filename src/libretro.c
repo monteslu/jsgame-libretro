@@ -146,8 +146,10 @@ RETRO_API void retro_run(void) {
         video_cb(NULL, cur_width, cur_height, cur_width * sizeof(uint32_t));
     }
 
-    // S2: silence. Real audio lands in Phase 2.
-    audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
+    const int16_t* samples = NULL;
+    size_t frames = jsg_host_audio(&samples);
+    if (frames > 0) audio_batch_cb(samples, frames);
+    else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
 }
 
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {

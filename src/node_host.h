@@ -40,6 +40,10 @@ void jsg_host_set_pads(const jsg_pad_t pads[4]);
 // core's lifetime; frontend persists it as .srm.
 void jsg_host_set_sram(uint8_t* sram, size_t size);
 
+// Audio pushed by JS for the current frame (interleaved stereo int16).
+// Returns frame count (0 = emit silence) and resets the pending buffer.
+size_t jsg_host_audio(const int16_t** samples);
+
 // Stop the JS runtime for the current content (environment teardown; V8 stays up).
 void jsg_host_stop(void);
 

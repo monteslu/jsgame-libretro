@@ -214,7 +214,24 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
     connect(n) { return n; }
     disconnect() {}
   }
+  // Real engine class registered by bootstrap once the ESM vendor loads;
+  // constructions before that fall back to the silent stub.
+  let RealAudioContextClass = null;
+  const liveContexts = [];
+
   class AudioContext {
+    constructor(opts) {
+      if (RealAudioContextClass) {
+        const ctx = new RealAudioContextClass(opts);
+        liveContexts.push(ctx);
+        return ctx;
+      }
+      logErr('AudioContext created before engine ready — silent stub');
+      return new StubAudioContext();
+    }
+  }
+
+  class StubAudioContext {
     constructor() {
       this.sampleRate = 48000;
       this.state = 'running';
@@ -445,6 +462,11 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
 
   return {
     displayCanvas,
+    setAudioContextClass(cls) { RealAudioContextClass = cls; },
+    pullAudio(numFrames) {
+      const ctx = liveContexts.find((c) => c.state === 'running');
+      return ctx ? ctx.pullFrames(numFrames) : null;
+    },
     async runEntry(entryPath) {
       const mod = loadModule(entryPath);
       await linkAndEvaluate(mod);
