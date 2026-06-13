@@ -61,6 +61,9 @@ static bool env_cb(unsigned cmd, void* data) {
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
             return true;
 #ifdef JSG_GL
+        case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER:
+            *(enum retro_hw_context_type*)data = RETRO_HW_CONTEXT_OPENGLES3;
+            return true;  // harness provides GLES3 via EGL (like a handheld)
         case RETRO_ENVIRONMENT_SET_HW_RENDER: {
             g_hw = (struct retro_hw_render_callback*)data;
             g_hw->get_current_framebuffer = harness_get_fb;
@@ -81,6 +84,14 @@ static void video_cb(const void* data, unsigned width, unsigned height, size_t p
         glReadPixels(width / 2, height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
         g_gl_center = px[0] | (px[1] << 8) | (px[2] << 16);
         g_fb_w = width; g_fb_h = height;
+        const char* gd = getenv("JSGAME_GL_DUMP");
+        if (gd) {
+            unsigned char* buf = malloc((size_t)width*height*4);
+            glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+            FILE* f = fopen(gd, "wb");          /* raw RGBA, GL bottom-up */
+            if (f) { fwrite(buf, 4, (size_t)width*height, f); fclose(f); }
+            free(buf);
+        }
         return;
     }
 #endif
