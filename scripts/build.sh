@@ -32,9 +32,13 @@ if [ "$(uname)" = "Darwin" ] && [ -f "$LIBCANVAS_A" ]; then
     export JSG_NAPI_OBJ="$NAPI_OBJ"
 fi
 
+CMAKE_EXTRA=()
+[ -n "${ANGLE_DIR:-}" ] && CMAKE_EXTRA+=("-DANGLE_DIR=$ANGLE_DIR")
+
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
     -DLIBCANVAS_A="$LIBCANVAS_A" \
     -DSKIA_LIB_DIR="$SKIA_LIB_DIR" \
+    "${CMAKE_EXTRA[@]}" \
     "$@"
 cmake --build build --config Release -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
