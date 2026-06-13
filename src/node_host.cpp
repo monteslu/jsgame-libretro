@@ -48,6 +48,9 @@ static unsigned g_fb_cap = 0;  // allocated pixels
 
 static jsg_pad_t g_pads[4];
 
+static uint8_t* g_sram = nullptr;
+static size_t g_sram_size = 0;
+
 static void logmsg(int level, const char* msg) {
   if (g_log) g_log(level, msg);
 }
@@ -134,6 +137,34 @@ static napi_value io_get_pads(napi_env env, napi_callback_info info) {
   return ta;
 }
 
+// sramRead() -> Uint8Array copy of the SRAM region (or null)
+static napi_value io_sram_read(napi_env env, napi_callback_info info) {
+  (void)info;
+  if (!g_sram || g_sram_size == 0) return nullptr;
+  napi_value ab, ta;
+  void* data = nullptr;
+  napi_create_arraybuffer(env, g_sram_size, &data, &ab);
+  memcpy(data, g_sram, g_sram_size);
+  napi_create_typedarray(env, napi_uint8_array, g_sram_size, ab, 0, &ta);
+  return ta;
+}
+
+// sramWrite(bytes: Uint8Array) — copy into the SRAM region (clamped)
+static napi_value io_sram_write(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  if (argc < 1 || !g_sram) return nullptr;
+  void* data = nullptr;
+  size_t len = 0;
+  napi_typedarray_type type;
+  napi_value ab;
+  size_t offset;
+  napi_get_typedarray_info(env, argv[0], &type, &len, &data, &ab, &offset);
+  if (data && len > 0) memcpy(g_sram, data, len < g_sram_size ? len : g_sram_size);
+  return nullptr;
+}
+
 static napi_value io_register(napi_env env, napi_value exports) {
   napi_value fn;
   napi_create_function(env, "present", NAPI_AUTO_LENGTH, io_present, nullptr, &fn);
@@ -142,6 +173,10 @@ static napi_value io_register(napi_env env, napi_value exports) {
   napi_set_named_property(env, exports, "log", fn);
   napi_create_function(env, "getPads", NAPI_AUTO_LENGTH, io_get_pads, nullptr, &fn);
   napi_set_named_property(env, exports, "getPads", fn);
+  napi_create_function(env, "sramRead", NAPI_AUTO_LENGTH, io_sram_read, nullptr, &fn);
+  napi_set_named_property(env, exports, "sramRead", fn);
+  napi_create_function(env, "sramWrite", NAPI_AUTO_LENGTH, io_sram_write, nullptr, &fn);
+  napi_set_named_property(env, exports, "sramWrite", fn);
   return exports;
 }
 
@@ -149,6 +184,19 @@ static napi_value io_register(napi_env env, napi_value exports) {
 
 static int v8_init() {
   if (g_v8_initialized) return 0;
+
+  // vm.SourceTextModule for the game realm's ESM loader — must be visible to
+  // node's option parser at process init, so NODE_OPTIONS not exec_args.
+  {
+    const char* prev = getenv("NODE_OPTIONS");
+    std::string opts = prev ? std::string(prev) + " --experimental-vm-modules"
+                            : "--experimental-vm-modules";
+#ifdef _WIN32
+    _putenv_s("NODE_OPTIONS", opts.c_str());
+#else
+    setenv("NODE_OPTIONS", opts.c_str(), 1);
+#endif
+  }
 
   std::vector<std::string> args = {"jsgame"};
   auto result = node::InitializeOncePerProcess(
@@ -277,6 +325,11 @@ extern "C" const uint32_t* jsg_host_framebuffer(unsigned* width, unsigned* heigh
 
 extern "C" void jsg_host_set_pads(const jsg_pad_t pads[4]) {
   memcpy(g_pads, pads, sizeof(g_pads));
+}
+
+extern "C" void jsg_host_set_sram(uint8_t* sram, size_t size) {
+  g_sram = sram;
+  g_sram_size = size;
 }
 
 extern "C" void jsg_host_stop(void) {

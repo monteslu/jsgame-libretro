@@ -1,82 +1,69 @@
-// bootstrap.js — privileged runtime bootstrap (S2 spike scope)
-// Loaded by node_host.cpp via createRequire. Full Node available HERE only;
-// the game realm (later) sees curated globals.
+// bootstrap.js — privileged runtime entry. Full Node available HERE only;
+// game code runs in the curated realm (realm.js).
+'use strict';
 
 const io = process._linkedBinding('jsgame_io');
-const canvasBinding = process._linkedBinding('canvas');
-
-const log = (...args) => io.log(1, args.join(' '));
-const logErr = (...args) => io.log(3, args.join(' '));
+const log = (...a) => io.log(1, a.join(' '));
+const logErr = (...a) => io.log(3, a.join(' '));
 
 process.on('uncaughtException', (err) => {
-  logErr('uncaughtException:', err && err.stack ? err.stack : String(err));
+  logErr('uncaughtException: ' + (err && err.stack ? err.stack : String(err)));
+});
+process.on('unhandledRejection', (err) => {
+  logErr('unhandledRejection: ' + (err && err.stack ? err.stack : String(err)));
 });
 
-log('bootstrap: content=' + globalThis.__jsg_paths.content);
-log('bootstrap: canvas binding keys: ' + Object.keys(canvasBinding).slice(0, 8).join(','));
+const canvasLib = require('./vendor/canvas/index.js');
+const { createContent, resolveEntry } = require('./content.js');
+const { buildRealm } = require('./realm.js');
 
-const WIDTH = 640;
-const HEIGHT = 480;
+const contentPath = globalThis.__jsg_paths.content;
+const content = createContent(contentPath);
 
-// S2: drive @napi-rs/canvas via the linked binding directly.
-const canvas = new canvasBinding.CanvasElement(WIDTH, HEIGHT);
-const ctx = canvas.getContext('2d');
+// Optional per-game config in the .jsg/.jsgame (JSON: {width, height})
+let width = 640, height = 480;
+try {
+  const marker = require('node:fs').readFileSync(contentPath, 'utf8');
+  const cfg = JSON.parse(marker);
+  if (cfg.width > 0 && cfg.width <= 1920) width = cfg.width | 0;
+  if (cfg.height > 0 && cfg.height <= 1080) height = cfg.height | 0;
+} catch { /* empty/non-JSON marker = defaults */ }
 
-// canvas.data() returns raw surface bytes. Skia N32 on little-endian is BGRA
-// premultiplied, which matches libretro XRGB8888 byte order (B,G,R,X) for
-// opaque pixels — verify with the color bars below (PLAN risk #10).
+log(`content: ${content.name} (${width}x${height})`);
+
+const realm = buildRealm({ content, io, canvasLib, width, height, log, logErr });
+
+const entry = resolveEntry(content);
+if (!entry) {
+  logErr('no game entry found (package.json main / main.js / src/main.js / ...)');
+} else {
+  log('entry: ' + entry);
+  realm.runEntry(entry).then(
+    () => log('entry evaluated'),
+    (err) => logErr('entry failed: ' + (err && err.stack ? err.stack : String(err)))
+  );
+}
+
 let frame = 0;
 
 globalThis.__jsg_frame = () => {
   frame++;
+  realm.fireFrame(io.getPads());
 
-  // Background
-  ctx.fillStyle = '#202030';
-  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  const canvas = realm.displayCanvas;
+  io.present(canvas.data(), canvas.width, canvas.height);
 
-  // Diagnostic color bars: must show RED, GREEN, BLUE left-to-right.
-  ctx.fillStyle = '#ff0000';
-  ctx.fillRect(40, 40, 120, 80);
-  ctx.fillStyle = '#00ff00';
-  ctx.fillRect(200, 40, 120, 80);
-  ctx.fillStyle = '#0000ff';
-  ctx.fillRect(360, 40, 120, 80);
-
-  // Moving box proves per-frame rendering
-  const x = (frame * 3) % (WIDTH - 60);
-  ctx.fillStyle = '#ffcc00';
-  ctx.fillRect(x, 200, 60, 60);
-
-  // Pad 0 button readout proves input path
-  const pads = io.getPads();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '20px sans-serif';
-  ctx.fillText('jsgame S2  frame ' + frame, 40, 320);
-  ctx.fillText('pad0 buttons: 0b' + (pads[0] >>> 0).toString(2).padStart(16, '0'), 40, 350);
-  ctx.fillText('lx ' + pads[1] + '  ly ' + pads[2], 40, 380);
-
-  const pixels = canvas.data();
-  io.present(pixels, WIDTH, HEIGHT);
-
-  // Debug: dump a PNG of frame 20 when requested (visual verification)
-  if (frame === 20 && process.env.JSGAME_DUMP_PNG) {
+  if (frame === Number(process.env.JSGAME_DUMP_FRAME || 0) && process.env.JSGAME_DUMP_PNG) {
     try {
-      const buf = canvas.encodeSync ? canvas.encodeSync('png') : canvas.toBuffer('image/png');
-      require('node:fs').writeFileSync(process.env.JSGAME_DUMP_PNG, buf);
-      log('dumped frame to ' + process.env.JSGAME_DUMP_PNG);
+      require('node:fs').writeFileSync(process.env.JSGAME_DUMP_PNG, canvas.encodeSync('png'));
+      log('dumped frame ' + frame + ' to ' + process.env.JSGAME_DUMP_PNG);
     } catch (e) {
       logErr('png dump failed: ' + e.message);
     }
   }
 };
 
-globalThis.__jsg_stop = () => {
-  log('bootstrap: stop');
-};
+globalThis.__jsg_stop = () => log('stop');
+globalThis.__jsg_start = (p) => log('restart: ' + p);
 
-globalThis.__jsg_start = (contentPath) => {
-  log('bootstrap: restart with ' + contentPath);
-  frame = 0;
-};
-
-log('bootstrap: ready');
+log('bootstrap ready');

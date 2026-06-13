@@ -36,6 +36,10 @@ typedef struct {
 
 void jsg_host_set_pads(const jsg_pad_t pads[4]);
 
+// SRAM region (localStorage backing store). Pointer must stay valid for the
+// core's lifetime; frontend persists it as .srm.
+void jsg_host_set_sram(uint8_t* sram, size_t size);
+
 // Stop the JS runtime for the current content (environment teardown; V8 stays up).
 void jsg_host_stop(void);
 

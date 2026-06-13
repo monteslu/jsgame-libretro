@@ -166,6 +166,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
 
+    jsg_host_set_sram(sram, SRAM_SIZE);
     core_log(RETRO_LOG_INFO, "loading content: %s", game->path);
     if (jsg_host_start(game->path, runtime_dir, host_log) != 0) {
         core_log(RETRO_LOG_ERROR, "JS runtime failed to start");
