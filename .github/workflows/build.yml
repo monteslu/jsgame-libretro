@@ -61,6 +61,7 @@ jobs:
         if: matrix.platform == 'windows-x86_64'
         shell: bash
         run: |
+          mkdir -p deps/angle_tmp
           curl -sL https://github.com/mmozeiko/build-angle/releases/download/2026-03-01/angle-x64-2026-03-01.zip -o angle.zip
           unzip -q angle.zip -d deps/angle_tmp
           mkdir -p deps/angle/include deps/angle/lib
@@ -89,6 +90,27 @@ jobs:
             -DLIBCANVAS_A=$PWD/deps/libcanvas/libcanvas.a \
             -DSKIA_LIB_DIR=$PWD/deps/libcanvas/skia
           cmake --build build -j4
+
+      - name: Fix ANGLE dylib paths (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          # ANGLE dylibs have relative install-names (./libEGL.dylib); the core
+          # records those and dlopen can't resolve them. Copy ANGLE next to the
+          # core and rewrite the references to @loader_path.
+          cp deps/angle/lib/*.dylib build/ 2>/dev/null || true
+          CORE=build/${{ matrix.lib }}
+          for dep in $(otool -L "$CORE" | awk '/libEGL|libGLESv2|libfeature_support|libchrome_zlib/ {print $1}'); do
+            base=$(basename "$dep")
+            install_name_tool -change "$dep" "@loader_path/$base" "$CORE" || true
+          done
+          # also fix inter-dylib refs (libGLESv2 -> libEGL etc.)
+          for d in build/libEGL.dylib build/libGLESv2.dylib; do
+            [ -f "$d" ] || continue
+            install_name_tool -id "@loader_path/$(basename "$d")" "$d" || true
+            for dep in $(otool -L "$d" | awk '/^\t\.\// {print $1}'); do
+              install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "$d" || true
+            done
+          done
 
       - name: Headless harness (realm demo, pixel asserts)
         if: matrix.harness
