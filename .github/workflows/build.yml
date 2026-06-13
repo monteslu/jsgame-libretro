@@ -13,7 +13,7 @@ jobs:
       matrix:
         include:
           - platform: linux-x86_64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04  # glibc floor 2.39 — set by prebuilt libnode (__isoc23_*); lowering needs a build-libnode rebuild on an older baseline
           # TODO(PLAN §15): linux-aarch64, windows-x86_64, macos-x86_64,
           # macos-aarch64, android-aarch64 — gated on build-libcanvas targets.
     runs-on: ${{ matrix.runner }}
