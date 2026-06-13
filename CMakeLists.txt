@@ -22,7 +22,7 @@ endif()
 if(NOT EXISTS "${LIBCANVAS_A}")
     message(FATAL_ERROR "libcanvas.a not found (set -DLIBCANVAS_A=...)")
 endif()
-if(NOT EXISTS "${SKIA_LIB_DIR}/libskia.a")
+if(NOT EXISTS "${SKIA_LIB_DIR}/libskia.a" AND NOT EXISTS "${SKIA_LIB_DIR}/skia.lib")
     message(FATAL_ERROR "Skia archives not found (set -DSKIA_LIB_DIR=...)")
 endif()
 

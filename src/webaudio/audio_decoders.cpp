@@ -22,6 +22,10 @@
 // uaac.h's MP4 parsing wants POSIX read/lseek (unused - we decode raw AAC).
 // jsgame fix: the old global stubs SHADOWED libc read/lseek for the whole .so
 // (libnode read empty files through them). Scope the stubs to uaac only.
+// jsgame: uaac.h has x86-only inline assembly ("Unsupported platform in
+// assembly.h" on ARM/MSVC). AAC is the least-needed codec for games
+// (MP3/OGG/WAV/FLAC cover it); gate it off by default.
+#ifdef JSG_ENABLE_AAC
 static ssize_t uaac_stub_read(int, void*, size_t) { return -1; }
 static off_t uaac_stub_lseek(int, off_t, int) { return -1; }
 #define read uaac_stub_read
@@ -29,6 +33,7 @@ static off_t uaac_stub_lseek(int, off_t, int) { return -1; }
 #include "../vendor/uaac.h"
 #undef read
 #undef lseek
+#endif
 
 #include <emscripten.h>
 #include <cstdlib>
@@ -213,6 +218,7 @@ int decodeVorbis(const uint8_t* input, size_t inputSize, float** output, size_t*
     return channels;
 }
 
+#ifdef JSG_ENABLE_AAC
 // Decode AAC file to interleaved float samples
 // Returns: number of channels, or -1 on error
 // Output format: interleaved float32 samples [L, R, L, R, ...]
@@ -302,6 +308,7 @@ int decodeAAC(const uint8_t* input, size_t inputSize, float** output, size_t* to
 
     return channels;
 }
+#endif  // JSG_ENABLE_AAC
 
 // Resample audio using Speex resampler (high quality, SIMD-optimized)
 // Returns: resampled buffer (caller must free), or NULL on error
@@ -403,7 +410,11 @@ int decodeAudio(const uint8_t* input, size_t inputSize, float** output, size_t* 
 
     // AAC: starts with 0xFF 0xFx (ADTS sync word) - checked after MP3
     if (input[0] == 0xFF && (input[1] & 0xF0) == 0xF0) {
+#ifdef JSG_ENABLE_AAC
         return decodeAAC(input, inputSize, output, totalSamples, sampleRate);
+#else
+        return -1;  // AAC disabled (uaac is x86-only)
+#endif
     }
 
     // WAV: starts with "RIFF"

@@ -24,10 +24,11 @@ jobs:
             runner: ubuntu-24.04
             lib: jsgame_libretro.so
             harness: false
-          - platform: macos-x86_64
-            runner: macos-13
-            lib: jsgame_libretro.dylib
-            harness: true
+          # macos-x86_64 parked: free-tier macos-13 Intel runners stall for hours.
+          # - platform: macos-x86_64
+          #   runner: macos-13
+          #   lib: jsgame_libretro.dylib
+          #   harness: true
           - platform: macos-aarch64
             runner: macos-14
             lib: jsgame_libretro.dylib
