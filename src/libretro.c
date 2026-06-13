@@ -69,6 +69,48 @@ static void core_log(enum retro_log_level level, const char* fmt, ...) {
     else fprintf(stderr, "[jsgame] %s\n", buf);
 }
 
+// retro_key -> DOM {code,key}. Static strings (jsg_host_key_event stores ptrs).
+// Covers the keys games actually use; unknowns fall through to no event.
+static void map_key(unsigned k, const char** code, const char** key) {
+    static char code_buf[8], key_buf[8];
+    *code = NULL; *key = NULL;
+    if (k >= 97 && k <= 122) {  // a-z (RETROK is lowercase ASCII)
+        code_buf[0]='K';code_buf[1]='e';code_buf[2]='y';code_buf[3]=(char)(k-32);code_buf[4]=0;
+        key_buf[0]=(char)k;key_buf[1]=0;
+        *code=code_buf;*key=key_buf;return;
+    }
+    if (k >= 48 && k <= 57) {  // 0-9
+        code_buf[0]='D';code_buf[1]='i';code_buf[2]='g';code_buf[3]='i';code_buf[4]='t';code_buf[5]=(char)k;code_buf[6]=0;
+        key_buf[0]=(char)k;key_buf[1]=0;
+        *code=code_buf;*key=key_buf;return;
+    }
+    switch (k) {
+        case 276: *code="ArrowLeft";  *key="ArrowLeft";  break;
+        case 275: *code="ArrowRight"; *key="ArrowRight"; break;
+        case 273: *code="ArrowUp";    *key="ArrowUp";    break;
+        case 274: *code="ArrowDown";  *key="ArrowDown";  break;
+        case 32:  *code="Space";      *key=" ";          break;
+        case 13:  *code="Enter";      *key="Enter";      break;
+        case 27:  *code="Escape";     *key="Escape";     break;
+        case 9:   *code="Tab";        *key="Tab";        break;
+        case 8:   *code="Backspace";  *key="Backspace";  break;
+        case 304: *code="ShiftLeft";  *key="Shift";      break;
+        case 303: *code="ShiftRight"; *key="Shift";      break;
+        case 306: *code="ControlLeft";*key="Control";    break;
+        case 305: *code="ControlRight";*key="Control";   break;
+        case 308: *code="AltLeft";    *key="Alt";        break;
+        case 307: *code="AltRight";   *key="Alt";        break;
+        default: break;
+    }
+}
+
+static void keyboard_cb(bool down, unsigned keycode, uint32_t character, uint16_t key_modifiers) {
+    (void)character; (void)key_modifiers;
+    const char* code; const char* key;
+    map_key(keycode, &code, &key);
+    if (code) jsg_host_key_event(down ? 1 : 0, code, key);
+}
+
 static void host_log(int level, const char* msg) {
     enum retro_log_level lvl = RETRO_LOG_INFO;
     if (level <= 0) lvl = RETRO_LOG_DEBUG;
@@ -87,6 +129,9 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     // Content is required (a .jsg marker or .jsgame zip).
     bool no_game = false;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
+
+    struct retro_keyboard_callback kbcb = { keyboard_cb };
+    cb(RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK, &kbcb);
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }

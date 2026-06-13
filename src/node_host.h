@@ -36,6 +36,10 @@ typedef struct {
 
 void jsg_host_set_pads(const jsg_pad_t pads[4]);
 
+// Enqueue a keyboard event (code/key must be static strings — the mapping
+// table in libretro.c provides them). Drained into the realm each frame.
+void jsg_host_key_event(int down, const char* code, const char* key);
+
 // SRAM region (localStorage backing store). Pointer must stay valid for the
 // core's lifetime; frontend persists it as .srm.
 void jsg_host_set_sram(uint8_t* sram, size_t size);

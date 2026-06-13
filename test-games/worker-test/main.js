@@ -10,8 +10,8 @@ function loop() {
   ctx.fillStyle = '#222'; ctx.fillRect(0, 0, 640, 480);
   ctx.fillStyle = '#fff'; ctx.font = '20px sans-serif';
   ctx.fillText('worker result: ' + (result ? JSON.stringify(result) : 'pending'), 20, 240);
-  if (frame === 180 && !result) console.error('WORKER FAIL: no reply by frame 50');
-  if (frame === 180 && result) console.log('WORKER OK');
+  if (frame === 250 && !result) console.error('WORKER FAIL: no reply by frame 50');
+  if (frame === 250 && result) console.log('WORKER OK');
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);

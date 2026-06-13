@@ -58,6 +58,13 @@ static unsigned g_fb_cap = 0;  // allocated pixels
 
 static jsg_pad_t g_pads[4];
 
+// Keyboard event queue (core enqueues from RETRO_KEYBOARD_CALLBACK; drained
+// into the realm's dispatchKey each frame).
+struct jsg_key_ev { int down; const char* code; const char* key; };
+#define JSG_KEY_QUEUE 64
+static jsg_key_ev g_keyq[JSG_KEY_QUEUE];
+static int g_keyq_head = 0, g_keyq_count = 0;
+
 static uint8_t* g_sram = nullptr;
 static size_t g_sram_size = 0;
 
@@ -381,6 +388,23 @@ extern "C" int jsg_host_frame(void) {
   v8::Local<v8::Context> ctx = g_setup->context();
   v8::Context::Scope context_scope(ctx);
 
+  // Drain queued key events -> realm.dispatchKey(type, code, key, down)
+  while (g_keyq_count > 0) {
+    jsg_key_ev e = g_keyq[g_keyq_head];
+    g_keyq_head = (g_keyq_head + 1) % JSG_KEY_QUEUE;
+    g_keyq_count--;
+    v8::Local<v8::Value> dk;
+    if (ctx->Global()->Get(ctx, v8::String::NewFromUtf8Literal(g_isolate, "__jsg_dispatchKey")).ToLocal(&dk) && dk->IsFunction()) {
+      v8::Local<v8::Value> args[3] = {
+        v8::String::NewFromUtf8(g_isolate, e.down ? "keydown" : "keyup").ToLocalChecked(),
+        v8::String::NewFromUtf8(g_isolate, e.code ? e.code : "").ToLocalChecked(),
+        v8::String::NewFromUtf8(g_isolate, e.key ? e.key : "").ToLocalChecked(),
+      };
+      v8::TryCatch ktc(g_isolate);
+      (void)dk.As<v8::Function>()->Call(ctx, ctx->Global(), 3, args);
+    }
+  }
+
   v8::Local<v8::Value> fn;
   if (ctx->Global()
           ->Get(ctx, v8::String::NewFromUtf8Literal(g_isolate, "__jsg_frame"))
@@ -407,6 +431,15 @@ extern "C" const uint32_t* jsg_host_framebuffer(unsigned* width, unsigned* heigh
   *width = g_fb_w;
   *height = g_fb_h;
   return g_fb;
+}
+
+extern "C" void jsg_host_key_event(int down, const char* code, const char* key) {
+  if (g_keyq_count >= JSG_KEY_QUEUE) return;
+  int slot = (g_keyq_head + g_keyq_count) % JSG_KEY_QUEUE;
+  g_keyq[slot].down = down;
+  g_keyq[slot].code = code;  // static strings from the mapping table
+  g_keyq[slot].key = key;
+  g_keyq_count++;
 }
 
 extern "C" void jsg_host_set_pads(const jsg_pad_t pads[4]) {

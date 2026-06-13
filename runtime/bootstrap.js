@@ -110,6 +110,7 @@ globalThis.__jsg_frame = () => {
   }
 };
 
+globalThis.__jsg_dispatchKey = (type, code, key) => realm.dispatchKey(type, code, key, type === 'keydown');
 globalThis.__jsg_stop = () => log('stop');
 globalThis.__jsg_start = (p) => log('restart: ' + p);
 

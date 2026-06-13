@@ -42,6 +42,7 @@ static int egl_init(int w, int h) {
 static const uint32_t* g_fb;
 static unsigned g_fb_w, g_fb_h;
 static size_t g_audio_frames;
+static retro_keyboard_event_t g_kbcb;
 
 static void log_printf(enum retro_log_level level, const char* fmt, ...) {
     va_list va;
@@ -57,6 +58,9 @@ static bool env_cb(unsigned cmd, void* data) {
             return *(enum retro_pixel_format*)data == RETRO_PIXEL_FORMAT_XRGB8888;
         case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
             ((struct retro_log_callback*)data)->log = log_printf;
+            return true;
+        case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK:
+            g_kbcb = ((struct retro_keyboard_callback*)data)->callback;
             return true;
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
             return true;
@@ -195,7 +199,12 @@ int main(int argc, char** argv) {
     const char* dump = getenv("JSGAME_AUDIO_DUMP");
     if (dump) g_dump = fopen(dump, "wb");
     int pace_us = getenv("JSGAME_PACE_MS") ? atoi(getenv("JSGAME_PACE_MS")) * 1000 : 0;
-    for (int i = 0; i < frames; i++) { retro_run(); if (pace_us) usleep(pace_us); }
+    for (int i = 0; i < frames; i++) {
+        if (g_kbcb && i == 5) g_kbcb(true, 97, 'a', 0);   /* press 'a' */
+        if (g_kbcb && i == 10) g_kbcb(false, 97, 'a', 0); /* release */
+        retro_run();
+        if (pace_us) usleep(pace_us);
+    }
     if (g_dump) fclose(g_dump);
 #ifdef JSG_GL
     printf("gl center pixel: %06X\n", g_gl_center);
