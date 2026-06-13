@@ -60,8 +60,11 @@ else()
     # Linux: group the canvas/skia/libnode archives to resolve cross-deps.
     # libc++/libc++abi static: skia + skia_c are built against libc++;
     # libnode is libstdc++ — both statically linked, symbols localized.
-    find_library(LIBCXX_STATIC c++ PATHS /usr/lib/x86_64-linux-gnu /usr/lib/llvm-19/lib)
-    find_library(LIBCXXABI_STATIC c++abi PATHS /usr/lib/x86_64-linux-gnu /usr/lib/llvm-19/lib)
+    # NAMES with explicit .a: plain find_library prefers the shared flavor,
+    # whose libc++abi drags a libunwind.so.1 DT_NEEDED that flatpak runtimes
+    # (RetroDeck) don't ship. Static keeps unwind symbols out of DT_NEEDED.
+    find_library(LIBCXX_STATIC NAMES libc++.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib/llvm-19/lib /usr/lib/llvm-18/lib)
+    find_library(LIBCXXABI_STATIC NAMES libc++abi.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib/llvm-19/lib /usr/lib/llvm-18/lib)
     # whole-archive on libcanvas.a: napi-rs registers classes via ctor
     # initializers in objects nothing references — without this, class
     # constructors silently vanish ("Class contains no constructor").
