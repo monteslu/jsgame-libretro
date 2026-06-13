@@ -50,8 +50,8 @@ static void context_destroy(void) {
 static void audio_callback(void) {
     const int16_t* samples = NULL;
     size_t frames = jsg_host_audio(&samples);
+    // Deliver only real data — injecting silence between chunks IS static.
     if (frames > 0) audio_batch_cb(samples, frames);
-    else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS) / 4);
 }
 static void audio_set_state(bool enable) { audio_running = enable; }
 static unsigned cur_width = DEFAULT_WIDTH;
@@ -226,6 +226,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
     struct retro_audio_callback audio_cb_desc = { audio_callback, audio_set_state };
     async_audio = environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK, &audio_cb_desc);
+    jsg_host_set_audio_backpressure(async_audio);
     core_log(RETRO_LOG_INFO, "async audio: %s", async_audio ? "yes" : "no (sync fallback)");
 
     jsg_host_set_sram(sram, SRAM_SIZE);

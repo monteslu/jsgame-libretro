@@ -19,10 +19,12 @@ const SnapshotData* SnapshotBuilder::GetEmbeddedSnapshotData() { return nullptr;
 #include "uv.h"
 #include "v8.h"
 
+#include <chrono>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -68,6 +70,8 @@ static size_t g_audio_head = 0;  // frames
 static size_t g_audio_count = 0; // frames pending
 static int16_t g_audio_out[JSG_AUDIO_RING_FRAMES * 2];
 static std::mutex g_audio_mtx;  // ring shared with the frontend audio thread
+static std::condition_variable g_audio_cv;
+static bool g_audio_backpressure = false;  // async mode: block pushes on full ring
 
 static void logmsg(int level, const char* msg) {
   if (g_log) g_log(level, msg);
@@ -170,7 +174,14 @@ static napi_value io_push_audio(napi_env env, napi_callback_info info) {
   if (!data || type != napi_int16_array) return nullptr;
   size_t frames = len / 2;
   const int16_t* src = (const int16_t*)data;
-  std::lock_guard<std::mutex> lk(g_audio_mtx);
+  std::unique_lock<std::mutex> lk(g_audio_mtx);
+  if (g_audio_backpressure) {
+    // Audio-clock pacing: the frontend audio thread drains at exactly real
+    // time; blocking here when >2 ticks are banked throttles retro_run to
+    // 60fps regardless of frontend vsync quirks. Timeout guards shutdown.
+    g_audio_cv.wait_for(lk, std::chrono::milliseconds(100),
+                        [&] { return g_audio_count + frames <= 800 * 3; });
+  }
   for (size_t f = 0; f < frames && g_audio_count < JSG_AUDIO_RING_FRAMES; f++) {
     size_t slot = (g_audio_head + g_audio_count) % JSG_AUDIO_RING_FRAMES;
     g_audio_ring[slot * 2] = src[f * 2];
@@ -379,6 +390,12 @@ extern "C" void jsg_host_set_pads(const jsg_pad_t pads[4]) {
   memcpy(g_pads, pads, sizeof(g_pads));
 }
 
+extern "C" void jsg_host_set_audio_backpressure(bool enable) {
+  std::lock_guard<std::mutex> lk(g_audio_mtx);
+  g_audio_backpressure = enable;
+  g_audio_cv.notify_all();
+}
+
 extern "C" void jsg_host_set_sram(uint8_t* sram, size_t size) {
   g_sram = sram;
   g_sram_size = size;
@@ -399,11 +416,14 @@ extern "C" size_t jsg_host_audio(const int16_t** samples) {
   }
   g_audio_head = (g_audio_head + frames) % JSG_AUDIO_RING_FRAMES;
   g_audio_count -= frames;
-  // Bound backlog to ~3 ticks: drop oldest so latency can't creep after bursts.
-  while (g_audio_count > TICK * 3) {
-    g_audio_head = (g_audio_head + TICK) % JSG_AUDIO_RING_FRAMES;
-    g_audio_count -= TICK;
+  if (!g_audio_backpressure) {
+    // Sync mode only: bound backlog (drop oldest) so latency can't creep.
+    while (g_audio_count > TICK * 3) {
+      g_audio_head = (g_audio_head + TICK) % JSG_AUDIO_RING_FRAMES;
+      g_audio_count -= TICK;
+    }
   }
+  g_audio_cv.notify_all();
   *samples = g_audio_out;
   return frames;
 }

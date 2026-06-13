@@ -40,6 +40,9 @@ void jsg_host_set_pads(const jsg_pad_t pads[4]);
 // core's lifetime; frontend persists it as .srm.
 void jsg_host_set_sram(uint8_t* sram, size_t size);
 
+// Async-audio mode: pushes block when the ring is full (audio-clock pacing).
+void jsg_host_set_audio_backpressure(bool enable);
+
 // Audio pushed by JS for the current frame (interleaved stereo int16).
 // Returns frame count (0 = emit silence) and resets the pending buffer.
 size_t jsg_host_audio(const int16_t** samples);
