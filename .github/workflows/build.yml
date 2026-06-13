@@ -6,11 +6,6 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Force JS actions onto Node.js 24 now (runner default is still node20 until
-# 2026-06-16). Clears the "Node.js 20 actions are deprecated" warnings.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 jobs:
   build:
     strategy:
@@ -44,9 +39,9 @@ jobs:
             harness: false
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with: { node-version: 22 }
 
       - name: Install static libc++ (linux)
@@ -94,7 +89,7 @@ jobs:
             zip -j dist/jsgame_libretro-${{ matrix.platform }}.zip build/${{ matrix.lib }} jsgame_libretro.info
           fi
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: jsgame_libretro-${{ matrix.platform }}
           path: dist/*.zip
@@ -106,8 +101,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with: { merge-multiple: true }
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: jsgame_libretro-*.zip
