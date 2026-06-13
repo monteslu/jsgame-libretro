@@ -18,8 +18,8 @@ statically linked), ES modules, Gamepad API over RetroPad, real WebAudio
 (webaudio-node's DSP engine compiled in), localStorage backed by libretro save
 RAM, and a deterministic 60fps frame clock — verified in RetroArch with audio.
 Released for 5 platforms (Linux x86_64/arm64, Windows, macOS arm64, Android
-arm64). A full `WebGL2RenderingContext` and the in-realm Worker/WebSocket shims
-are next. See `PLAN.md` for the full design.
+arm64). Feature parity with jsgamelauncher is complete except Peer Connection.
+See `PLAN.md` for the full design.
 
 ## Content
 
@@ -47,10 +47,10 @@ a game that runs there is the target for running here unchanged.
 | LocalStorage | ✅ | backed by libretro SRAM (frontends persist as `.srm`) |
 | WebAssembly | ✅ | runs in V8, in the game realm and workers |
 | `fetch` / `Image` | ✅ | game-root scoped (dir or zip); HTTP off by default |
-| WebGL / Canvas 3D | 🚧 | GL binding works (`JSGAME_GL=1`); full `WebGL2RenderingContext` in progress |
-| Web Workers | 🚧 | engine proven (workers + `SharedArrayBuffer` + canvas-in-worker); not yet exposed to game code |
-| Keyboard events | 🚧 | controller-first; keyboard shim pending (desktop dev) |
-| WebSockets | 🚧 | host plumbing pending; gated behind a network core option |
+| WebGL2 / Canvas 3D | ✅ | full `WebGL2RenderingContext` (Skia-free GLES3 path); auto-enabled by `{"webgl":true}` in the `.jsg`; desktop via ANGLE |
+| Web Workers | ✅ | `worker_threads`-backed; curated worker realm; `SharedArrayBuffer`/`Atomics` |
+| Keyboard events | ✅ | `keydown`/`keyup` with `key`/`code` (frontend keyboard → realm) |
+| WebSockets | ✅ | privileged-realm socket + game façade; gated by `network` in the `.jsg` (`off`/`websocket`/`full`) |
 | Peer Connection | ❌ | not supported (matches jsgamelauncher) |
 | Save states / rewind | ⛔ | a V8 heap is not serializable; games persist via LocalStorage/SRAM |
 
