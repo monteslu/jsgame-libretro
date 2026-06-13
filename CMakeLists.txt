@@ -38,7 +38,9 @@ add_library(jsgame_libretro SHARED
     ${WEBAUDIO_SRC}
 )
 # vendored decoder headers (uaac AAC tables) trip gcc's C++ narrowing errors
-set_source_files_properties(src/webaudio/audio_decoders.cpp PROPERTIES COMPILE_OPTIONS "-Wno-narrowing")
+if(NOT MSVC)
+    set_source_files_properties(src/webaudio/audio_decoders.cpp PROPERTIES COMPILE_OPTIONS "-Wno-narrowing")
+endif()
 # webaudio engine sources include <emscripten.h> for EMSCRIPTEN_KEEPALIVE only
 set_source_files_properties(${WEBAUDIO_SRC} src/binding_audio.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/emshim;${CMAKE_CURRENT_SOURCE_DIR}/deps/simde;${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -55,16 +57,30 @@ target_include_directories(jsgame_libretro PRIVATE
 file(GLOB SKIA_LIBS "${SKIA_LIB_DIR}/*.a")
 
 if(WIN32)
+    file(GLOB SKIA_LIBS_WIN "${SKIA_LIB_DIR}/*.lib")
     target_link_libraries(jsgame_libretro PRIVATE
-        ${LIBCANVAS_A} ${SKIA_LIBS}
+        ${SKIA_LIBS_WIN}
         ${LIBNODE_DIR}/libnode.lib
         winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
+    target_link_options(jsgame_libretro PRIVATE "/WHOLEARCHIVE:${LIBCANVAS_A}")
 elseif(APPLE)
+    # Apple ld: -force_load is the whole-archive equivalent (napi-rs ctor
+    # registration objects must all be pulled in)
     target_link_libraries(jsgame_libretro PRIVATE
-        ${LIBCANVAS_A} ${SKIA_LIBS}
+        ${SKIA_LIBS}
         ${LIBNODE_DIR}/libnode.a pthread dl m c++
+        "-Wl,-force_load,${LIBCANVAS_A}"
         "-framework CoreFoundation" "-framework Security"
         "-framework SystemConfiguration" "-framework ApplicationServices")
+elseif(ANDROID)
+    add_library(cpufeatures STATIC ${ANDROID_NDK}/sources/android/cpufeatures/cpu-features.c)
+    target_include_directories(cpufeatures PUBLIC ${ANDROID_NDK}/sources/android/cpufeatures)
+    target_link_libraries(jsgame_libretro PRIVATE
+        -Wl,--whole-archive ${LIBCANVAS_A} -Wl,--no-whole-archive
+        -Wl,--start-group ${SKIA_LIBS} ${LIBNODE_DIR}/libnode.a -Wl,--end-group
+        dl m log android cpufeatures)
+    target_link_options(jsgame_libretro PRIVATE
+        -Wl,--allow-multiple-definition -Wl,--exclude-libs,ALL)
 else()
     # Linux: group the canvas/skia/libnode archives to resolve cross-deps.
     # libc++/libc++abi static: skia + skia_c are built against libc++;

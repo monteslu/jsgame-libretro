@@ -13,9 +13,29 @@ jobs:
       matrix:
         include:
           - platform: linux-x86_64
-            runner: ubuntu-24.04  # glibc floor 2.39 — set by prebuilt libnode (__isoc23_*); lowering needs a build-libnode rebuild on an older baseline
-          # TODO(PLAN §15): linux-aarch64, windows-x86_64, macos-x86_64,
-          # macos-aarch64, android-aarch64 — gated on build-libcanvas targets.
+            runner: ubuntu-24.04   # glibc floor 2.39 set by prebuilt libnode (__isoc23_*)
+            lib: jsgame_libretro.so
+            harness: true
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            lib: jsgame_libretro.so
+            harness: true
+          - platform: android-aarch64
+            runner: ubuntu-24.04
+            lib: jsgame_libretro.so
+            harness: false
+          - platform: macos-x86_64
+            runner: macos-13
+            lib: jsgame_libretro.dylib
+            harness: true
+          - platform: macos-aarch64
+            runner: macos-14
+            lib: jsgame_libretro.dylib
+            harness: true
+          - platform: windows-x86_64
+            runner: windows-2022
+            lib: jsgame_libretro.dll
+            harness: false
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -23,27 +43,48 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
 
-      - name: Install libc++ (static, for the Skia/libcanvas link)
+      - name: Install static libc++ (linux)
+        if: startsWith(matrix.platform, 'linux')
         run: sudo apt-get update && sudo apt-get install -y libc++-dev libc++abi-dev
 
-      - name: Fetch prebuilt deps (libnode + libcanvas)
+      - name: Fetch prebuilt deps (libnode + libcanvas + simde)
+        shell: bash
         run: ./scripts/fetch-deps.sh ${{ matrix.platform }}
 
-      - name: Build
+      - name: Build (host)
+        if: matrix.platform != 'android-aarch64'
+        shell: bash
         run: ./scripts/build.sh
 
+      - name: Build (android cross)
+        if: matrix.platform == 'android-aarch64'
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 \
+            -DANDROID_NDK=$ANDROID_NDK_LATEST_HOME \
+            -DLIBCANVAS_A=$PWD/deps/libcanvas/libcanvas.a \
+            -DSKIA_LIB_DIR=$PWD/deps/libcanvas/skia
+          cmake --build build -j4
+
       - name: Headless harness (realm demo, pixel asserts)
+        if: matrix.harness
+        shell: bash
         run: |
           cc -o test/harness test/harness.c -ldl
           JSGAME_RUNTIME_DIR=$PWD/runtime ./test/harness \
-            build/jsgame_libretro.so test-games/s2-demo/s2-demo.jsg 60
+            build/${{ matrix.lib }} test-games/s2-demo/s2-demo.jsg 60
 
       - name: Package
+        shell: bash
         run: |
           mkdir -p dist
-          strip build/jsgame_libretro.so || true
-          zip -j dist/jsgame_libretro-${{ matrix.platform }}.zip \
-            build/jsgame_libretro.so jsgame_libretro.info
+          strip build/${{ matrix.lib }} 2>/dev/null || true
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a dist/jsgame_libretro-${{ matrix.platform }}.zip ./build/${{ matrix.lib }} ./jsgame_libretro.info
+          else
+            zip -j dist/jsgame_libretro-${{ matrix.platform }}.zip build/${{ matrix.lib }} jsgame_libretro.info
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

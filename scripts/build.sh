@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LIBCANVAS_A="${LIBCANVAS_A:-$PWD/deps/libcanvas/libcanvas.a}"
+[ -f "$PWD/deps/libcanvas/libcanvas.lib" ] && LIBCANVAS_A="$PWD/deps/libcanvas/libcanvas.lib"
 SKIA_LIB_DIR="${SKIA_LIB_DIR:-$PWD/deps/libcanvas/skia}"
 
 # Spike fallback: sibling napi-canvas checkout (debug build)
