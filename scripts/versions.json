@@ -10,5 +10,9 @@
   "simde": {
     "repo": "simd-everywhere/simde",
     "release": "v0.8.2 (tag clone, falls back to default branch)"
+  },
+  "nodeAddonApi": {
+    "package": "node-addon-api",
+    "version": "8.5.0"
   }
 }

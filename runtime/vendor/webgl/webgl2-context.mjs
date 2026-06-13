@@ -630,7 +630,10 @@ export class WebGL2RenderingContext {
   }
 
   bindFramebuffer(target, fb) {
-    this._gl.glBindFramebuffer(target, unwrap(fb))
+    // jsgame: in a libretro core, "null" (the screen) is the FRONTEND's
+    // default framebuffer (get_current_framebuffer()), not GL FBO 0.
+    const id = fb == null ? (this._jsgDefaultFB || 0) : unwrap(fb)
+    this._gl.glBindFramebuffer(target, id)
     if (target === GL.FRAMEBUFFER || target === GL.DRAW_FRAMEBUFFER) this._boundFramebuffer = fb
     if (target === GL.FRAMEBUFFER || target === GL.READ_FRAMEBUFFER) this._boundReadFramebuffer = fb
   }

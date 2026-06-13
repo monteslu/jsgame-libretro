@@ -40,14 +40,16 @@ if (!entry) {
   logErr('no game entry found (package.json main / main.js / src/main.js / ...)');
 } else {
   log('entry: ' + entry);
-  // Real WebAudio first (ESM vendor; engine is WASM running in this V8) so a
-  // game constructing AudioContext at boot gets the real engine, not the stub.
-  import('./vendor/webaudio/LibretroAudioContext.js')
-    .then((m) => {
-      realm.setAudioContextClass(m.LibretroAudioContext);
-      log('webaudio engine ready');
-    })
-    .catch((e) => logErr('webaudio init failed (stub stays): ' + e.message))
+  // Load ESM vendor engines (WebAudio + WebGL2) before the game entry so a
+  // game constructing AudioContext / getContext('webgl2') at boot finds them.
+  Promise.all([
+    import('./vendor/webaudio/LibretroAudioContext.js')
+      .then((m) => { realm.setAudioContextClass(m.LibretroAudioContext); log('webaudio engine ready'); })
+      .catch((e) => logErr('webaudio init failed (stub stays): ' + e.message)),
+    import('./vendor/webgl/webgl2-context.mjs')
+      .then((m) => { realm.setWebGL2Class(m.WebGL2RenderingContext); log('webgl2 ready'); })
+      .catch((e) => logErr('webgl2 init failed: ' + e.message)),
+  ])
     .then(() => realm.runEntry(entry))
     .then(
       () => log('entry evaluated'),

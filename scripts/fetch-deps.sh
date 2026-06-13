@@ -35,3 +35,12 @@ if [ ! -f deps/simde/simde/wasm/simd128.h ]; then
     git clone -q --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git deps/simde 2>/dev/null \
         || git clone -q --depth 1 https://github.com/simd-everywhere/simde.git deps/simde
 fi
+
+# node-addon-api headers (header-only) for the GLES3/WebGL2 binding (gl_bindings.cpp)
+if [ ! -f deps/node-addon-api/napi.h ]; then
+    echo "fetching node-addon-api..."
+    mkdir -p deps/node-addon-api
+    NAA_VER=8.5.0
+    curl -sL "https://registry.npmjs.org/node-addon-api/-/node-addon-api-${NAA_VER}.tgz" \
+        | tar xz -C deps/node-addon-api --strip-components=1 package/napi.h package/napi-inl.h package/napi-inl.deprecated.h
+fi

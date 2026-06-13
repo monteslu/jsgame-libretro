@@ -16,6 +16,7 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
   function wrapCanvas(canvas) {
     const baseGetContext = canvas.getContext.bind(canvas);
     let ctx;
+    let glCtx;
     canvas.style = {};
     const listeners = {};
     canvas.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
@@ -24,23 +25,18 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
     };
     canvas.getContext = function getContext(type) {
       if (type === 'webgl2' || type === 'webgl') {
-        const glb = process._linkedBinding('jsgame_gl');
-        if (!glb.ready()) {
-          logErr('getContext(webgl2): no HW render context (set JSGAME_GL=1)');
+        if (!WebGL2Ctx) {
+          logErr('getContext(webgl2): GL not ready (no HW render context; set JSGAME_GL=1)');
           return null;
         }
-        // S5 spike surface: raw binding + the constants the spike needs.
-        // Phase 3 replaces this with a full WebGL2RenderingContext.
-        const gl = Object.assign(Object.create(null), glb, {
-          canvas,
-          VERTEX_SHADER: 0x8b31, FRAGMENT_SHADER: 0x8b30,
-          COMPILE_STATUS: 0x8b81, LINK_STATUS: 0x8b82,
-          ARRAY_BUFFER: 0x8892, STATIC_DRAW: 0x88e4,
-          COLOR_BUFFER_BIT: 0x4000, DEPTH_BUFFER_BIT: 0x100,
-          TRIANGLES: 0x0004, FLOAT: 0x1406,
-        });
-        canvas._isWebGL = true;
-        return gl;
+        if (!glCtx) {
+          const glb = process._linkedBinding('jsgame_gl');
+          glCtx = new WebGL2Ctx(glb, canvas.width, canvas.height, { canvas });
+          glCtx.canvas = canvas;
+          glCtx._jsgDefaultFB = glb.jsgDefaultFramebuffer ? glb.jsgDefaultFramebuffer() : 0;
+          canvas._isWebGL = true;
+        }
+        return glCtx;
       }
       if (type !== '2d') {
         logErr('getContext(' + type + ') unsupported');
@@ -237,6 +233,7 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
   // constructions before that fall back to the silent stub.
   let RealAudioContextClass = null;
   const liveContexts = [];
+  let WebGL2Ctx = null;  // set once the ESM webgl2-context loads
 
   class AudioContext {
     constructor(opts) {
@@ -482,6 +479,7 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
   return {
     displayCanvas,
     setAudioContextClass(cls) { RealAudioContextClass = cls; },
+    setWebGL2Class(cls) { WebGL2Ctx = cls; },
     hasAudio() { return liveContexts.some((c) => c.state === 'running'); },
     pullAudio(numFrames) {
       const ctx = liveContexts.find((c) => c.state === 'running');

@@ -34,6 +34,8 @@ add_library(jsgame_libretro SHARED
     src/libretro.c
     src/node_host.cpp
     src/binding_gl.cpp
+    src/gl/binding_gl_full.cpp
+    src/gl/gl_bindings.cpp
     src/binding_audio.cpp
     ${WEBAUDIO_SRC}
 )
@@ -55,10 +57,16 @@ foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
         LIBRARY_OUTPUT_DIRECTORY${cfg} "${CMAKE_BINARY_DIR}")
 endforeach()
 
+set(NODE_ADDON_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps/node-addon-api" CACHE PATH "node-addon-api headers")
 target_include_directories(jsgame_libretro PRIVATE
     src
+    src/gl
     ${LIBNODE_DIR}/include
+    ${NODE_ADDON_API_DIR}
 )
+# node-addon-api: pin N-API version; it uses C++ exceptions for Napi:: errors
+target_compile_definitions(jsgame_libretro PRIVATE
+    NAPI_VERSION=8 NODE_ADDON_API_DISABLE_DEPRECATED)
 
 # All Skia archives (official build emits many; link as one group)
 file(GLOB SKIA_LIBS "${SKIA_LIB_DIR}/*.a")

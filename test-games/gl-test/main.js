@@ -23,7 +23,7 @@ gl.enableVertexAttribArray(loc);
 gl.vertexAttribPointer(loc, 2, gl.FLOAT, 0, 0, 0);
 console.log('gl setup done, err=' + gl.getError());
 function loop() {
-  gl.bindDefaultFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);  // screen = frontend default FBO
   gl.viewport(0, 0, 640, 480);
   gl.clearColor(0.1, 0.1, 0.2, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
