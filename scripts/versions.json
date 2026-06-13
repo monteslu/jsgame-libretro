@@ -6,5 +6,9 @@
   "libcanvas": {
     "repo": "monteslu/build-libcanvas",
     "release": "v1.0.0-jsg1"
+  },
+  "simde": {
+    "repo": "simd-everywhere/simde",
+    "release": "v0.8.2 (tag clone, falls back to default branch)"
   }
 }

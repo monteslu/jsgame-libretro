@@ -28,3 +28,10 @@ if [ "$LIBCANVAS_RELEASE" != "null" ] && [ ! -f deps/libcanvas/libcanvas.a ]; th
     cat deps/libcanvas/CANVAS_VERSION
 fi
 # If no release is pinned yet, scripts/build.sh falls back to ../napi-canvas.
+
+# SIMDe: maps the audio engine's wasm_simd128.h intrinsics to native SIMD
+if [ ! -f deps/simde/simde/wasm/simd128.h ]; then
+    echo "fetching simde..."
+    git clone -q --depth 1 --branch v0.8.2 https://github.com/simd-everywhere/simde.git deps/simde 2>/dev/null \
+        || git clone -q --depth 1 https://github.com/simd-everywhere/simde.git deps/simde
+fi
