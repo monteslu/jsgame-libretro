@@ -68,7 +68,10 @@ if(WIN32)
     target_link_libraries(jsgame_libretro PRIVATE
         ${SKIA_LIBS_WIN}
         ${LIBNODE_DIR}/libnode.lib
-        winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt)
+        winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt
+        # Skia GDI fontmgr (ScriptShape) + XPS (CreateFontPackage) + Rust std
+        # (Nt* syscalls): Uniscribe, font-subsetting, and ntdll import libs.
+        usp10 fontsub ntdll gdi32 user32 ole32 oleaut32 shell32 advapi32)
     target_link_options(jsgame_libretro PRIVATE "/WHOLEARCHIVE:${LIBCANVAS_A}")
 elseif(APPLE)
     # Apple ld: -force_load is the whole-archive equivalent (napi-rs ctor
