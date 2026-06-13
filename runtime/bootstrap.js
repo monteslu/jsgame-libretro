@@ -66,4 +66,31 @@ globalThis.__jsg_frame = () => {
 globalThis.__jsg_stop = () => log('stop');
 globalThis.__jsg_start = (p) => log('restart: ' + p);
 
+// S3 spike: worker_threads under the embedded env + linked bindings in workers
+if (process.env.JSGAME_TEST_WORKERS) {
+  const { Worker } = require('node:worker_threads');
+  const sab = new SharedArrayBuffer(4);
+  const view = new Int32Array(sab);
+  const w = new Worker(
+    `const { parentPort, workerData } = require('node:worker_threads');
+     let canvasOk = false, drawOk = false;
+     try {
+       const b = process._linkedBinding('canvas');
+       canvasOk = typeof b.CanvasElement === 'function';
+       const c = new b.CanvasElement(32, 32);
+       const x = c.getContext('2d');
+       x.fillStyle = '#ff0000'; x.fillRect(0, 0, 32, 32);
+       drawOk = c.data()[0] === 255;
+     } catch (e) { parentPort.postMessage({ err: e.message }); }
+     new Int32Array(workerData.sab)[0] = 42;
+     parentPort.postMessage({ canvasOk, drawOk });`,
+    { eval: true, workerData: { sab } }
+  );
+  w.on('message', (m) => {
+    log('S3 worker result: ' + JSON.stringify(m) + ' sab=' + view[0]);
+    w.terminate();
+  });
+  w.on('error', (e) => logErr('S3 worker error: ' + e.message));
+}
+
 log('bootstrap ready');

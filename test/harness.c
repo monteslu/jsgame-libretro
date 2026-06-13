@@ -116,7 +116,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    for (int i = 0; i < 30; i++) retro_run();
+    int frames = argc > 3 ? atoi(argv[3]) : 30;
+    for (int i = 0; i < frames; i++) retro_run();
 
     if (!g_fb || g_fb_w == 0) {
         fprintf(stderr, "FAIL: no framebuffer presented after 30 frames\n");
