@@ -29,6 +29,13 @@ static napi_value jsg_gl_default_fb(napi_env env, napi_callback_info info) {
   return v;
 }
 
+static napi_value jsg_gl_is_ready(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value v;
+  napi_get_boolean(env, g_get_proc != nullptr, &v);
+  return v;
+}
+
 extern "C" napi_value jsg_gl_register(napi_env env, napi_value exports) {
   Napi::Env napiEnv(env);
   Napi::Object obj(env, exports);
@@ -38,5 +45,8 @@ extern "C" napi_value jsg_gl_register(napi_env env, napi_value exports) {
   napi_create_function(env, "jsgDefaultFramebuffer", NAPI_AUTO_LENGTH,
                        jsg_gl_default_fb, nullptr, &fn);
   napi_set_named_property(env, exports, "jsgDefaultFramebuffer", fn);
+  napi_value rfn;
+  napi_create_function(env, "jsgReady", NAPI_AUTO_LENGTH, jsg_gl_is_ready, nullptr, &rfn);
+  napi_set_named_property(env, exports, "jsgReady", rfn);
   return exports;
 }

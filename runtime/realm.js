@@ -29,8 +29,12 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
           logErr('getContext(webgl2): GL not ready (no HW render context; set JSGAME_GL=1)');
           return null;
         }
+        const glb = process._linkedBinding('jsgame_gl');
+        if (glb.jsgReady && !glb.jsgReady()) {
+          logErr('getContext(webgl2): frontend granted no GL context (desktop GL/GLES mismatch?)');
+          return null;
+        }
         if (!glCtx) {
-          const glb = process._linkedBinding('jsgame_gl');
           glCtx = new WebGL2Ctx(glb, canvas.width, canvas.height, { canvas });
           glCtx.canvas = canvas;
           glCtx._jsgDefaultFB = glb.jsgDefaultFramebuffer ? glb.jsgDefaultFramebuffer() : 0;

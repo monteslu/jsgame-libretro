@@ -202,19 +202,28 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
 
     // S5 spike: opt-in GL via env; Phase 3 negotiates per-game.
     if (getenv("JSGAME_GL")) {
-        memset(&hw_render, 0, sizeof(hw_render));
-        hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
-        hw_render.context_reset = context_reset;
-        hw_render.context_destroy = context_destroy;
-        hw_render.depth = true;
-        hw_render.stencil = true;
-        hw_render.bottom_left_origin = true;
-        if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
-            gl_active = true;
-            core_log(RETRO_LOG_INFO, "HW render (GLES3) negotiated");
-        } else {
-            core_log(RETRO_LOG_WARN, "HW render refused; staying software");
+        // Try GLES3 (handhelds, RetroDeck), then desktop GL core 3.3
+        // (desktop RetroArch is often built against desktop GL, not GLES).
+        unsigned ctx_types[2] = { RETRO_HW_CONTEXT_OPENGLES3, RETRO_HW_CONTEXT_OPENGL_CORE };
+        const char* ctx_names[2] = { "GLES3", "GL core 3.3" };
+        for (int i = 0; i < 2 && !gl_active; i++) {
+            memset(&hw_render, 0, sizeof(hw_render));
+            hw_render.context_type = ctx_types[i];
+            hw_render.context_reset = context_reset;
+            hw_render.context_destroy = context_destroy;
+            hw_render.depth = true;
+            hw_render.stencil = true;
+            hw_render.bottom_left_origin = true;
+            if (ctx_types[i] == RETRO_HW_CONTEXT_OPENGL_CORE) {
+                hw_render.version_major = 3;
+                hw_render.version_minor = 3;
+            }
+            if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
+                gl_active = true;
+                core_log(RETRO_LOG_INFO, "HW render (%s) negotiated", ctx_names[i]);
+            }
         }
+        if (!gl_active) core_log(RETRO_LOG_WARN, "no GL context; staying software");
     }
 
     const char* runtime_dir = getenv("JSGAME_RUNTIME_DIR");  // dev mode
