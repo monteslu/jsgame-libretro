@@ -66,8 +66,10 @@ if(WIN32)
 elseif(APPLE)
     # Apple ld: -force_load is the whole-archive equivalent (napi-rs ctor
     # registration objects must all be pulled in)
+    # NOTE: libcanvas.a fully bundles Skia (it whole-archived skia during its
+    # own build) — do NOT also link skia/*.a or Apple ld errors "duplicate
+    # symbol". force_load pulls libcanvas's napi ctors + all of Skia.
     target_link_libraries(jsgame_libretro PRIVATE
-        ${SKIA_LIBS}
         ${LIBNODE_DIR}/libnode.a pthread dl m c++
         "-Wl,-force_load,${LIBCANVAS_A}"
         "-framework CoreFoundation" "-framework Security"
