@@ -33,6 +33,8 @@ const SnapshotData* SnapshotBuilder::GetEmbeddedSnapshotData() { return nullptr;
 extern "C" napi_value napi_register_module_v1(napi_env env, napi_value exports);
 // GL binding (binding_gl.cpp)
 extern "C" napi_value jsg_gl_register(napi_env env, napi_value exports);
+// Audio binding (binding_audio.cpp)
+extern "C" napi_value jsg_audio_register(napi_env env, napi_value exports);
 
 // ─── Module state ────────────────────────────────────────────────────────
 
@@ -281,6 +283,7 @@ extern "C" int jsg_host_start(const char* content_path, const char* runtime_dir,
     node::AddLinkedBinding(g_env, "canvas", napi_register_module_v1);
     node::AddLinkedBinding(g_env, "jsgame_io", io_register);
     node::AddLinkedBinding(g_env, "jsgame_gl", jsg_gl_register);
+    node::AddLinkedBinding(g_env, "jsgame_audio", jsg_audio_register);
 
     // Trampoline: stash paths, then load bootstrap.js via createRequire.
     // TODO(embedded runtime): incbin runtime.zip; for now runtime_dir required.

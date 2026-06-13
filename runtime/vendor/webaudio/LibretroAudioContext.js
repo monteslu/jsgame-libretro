@@ -2,7 +2,7 @@
 // pull: the core asks for exactly sampleRate/fps frames per retro_run.
 // Modeled on WasmOfflineAudioContext (same engine, no SDL device).
 
-import { WasmAudioEngine } from './wasm-integration/WasmAudioEngine.js';
+import { WasmAudioEngine, NativeAudioDecoders } from './NativeAudioEngine.js';
 import { AudioDestinationNode } from './javascript/nodes/AudioDestinationNode.js';
 import { GainNode } from './javascript/nodes/GainNode.js';
 import { OscillatorNode } from './javascript/nodes/OscillatorNode.js';
@@ -22,7 +22,7 @@ import { ConstantSourceNode } from './javascript/nodes/ConstantSourceNode.js';
 import { AudioBuffer } from './javascript/AudioBuffer.js';
 import { AudioListener } from './javascript/AudioListener.js';
 import { PeriodicWave } from './javascript/PeriodicWave.js';
-import { WasmAudioDecoders } from './wasm-integration/WasmAudioDecoders.js';
+
 
 const MAX_PULL_FRAMES = 4096;
 
@@ -32,13 +32,19 @@ export class LibretroAudioContext {
     this._channels = 2;
     this.state = 'running';
 
-    this._engine = new WasmAudioEngine(this._channels, 0, this.sampleRate, true);
+    this._engine = new WasmAudioEngine(this._channels, 128 * 1000, this.sampleRate, true);
 
     const destNodeId = this._engine.createNode('destination');
     this.destination = new AudioDestinationNode(this, destNodeId);
     this.listener = new AudioListener(this);
 
-    this._floatBuf = new Float32Array(MAX_PULL_FRAMES * this._channels);
+    // The graph renders in 128-frame quanta. Asking _processGraph for a
+    // non-multiple leaves the tail of the buffer unfilled (heap garbage =
+    // full-scale noise). Render quantum-aligned into a FIFO, emit exact counts.
+    this._quantum = 128;
+    this._quantumBuf = new Float32Array(this._quantum * this._channels);
+    this._fifo = new Float32Array((MAX_PULL_FRAMES + this._quantum) * 2 * this._channels);
+    this._fifoLen = 0; // samples
     this._intBuf = new Int16Array(MAX_PULL_FRAMES * this._channels);
   }
 
@@ -50,14 +56,20 @@ export class LibretroAudioContext {
   // int16 (a view over a reused buffer — consume before the next pull).
   pullFrames(numFrames) {
     if (numFrames > MAX_PULL_FRAMES) numFrames = MAX_PULL_FRAMES;
-    const n = numFrames * this._channels;
-    const f32 = this._floatBuf.subarray(0, n);
-    this._engine.renderBlock(f32, numFrames);
-    const i16 = this._intBuf.subarray(0, n);
-    for (let i = 0; i < n; i++) {
-      const v = f32[i];
+    const ch = this._channels;
+    const need = numFrames * ch;
+    while (this._fifoLen < need) {
+      this._engine.renderBlock(this._quantumBuf, this._quantum);
+      this._fifo.set(this._quantumBuf, this._fifoLen);
+      this._fifoLen += this._quantum * ch;
+    }
+    const i16 = this._intBuf.subarray(0, need);
+    for (let i = 0; i < need; i++) {
+      const v = this._fifo[i];
       i16[i] = v <= -1 ? -32768 : v >= 1 ? 32767 : (v * 32767) | 0;
     }
+    this._fifo.copyWithin(0, need, this._fifoLen);
+    this._fifoLen -= need;
     return i16;
   }
 
@@ -86,7 +98,7 @@ export class LibretroAudioContext {
 
   async decodeAudioData(audioData, successCallback, errorCallback) {
     try {
-      const decoded = await WasmAudioDecoders.decode(this._engine.wasmModule, audioData, this.sampleRate);
+      const decoded = await NativeAudioDecoders.decode(null, audioData, this.sampleRate);
       const audioBuffer = new AudioBuffer({
         length: decoded.length,
         numberOfChannels: decoded.channels,

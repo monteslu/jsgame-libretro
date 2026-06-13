@@ -28,11 +28,20 @@ endif()
 
 # ─── Core ────────────────────────────────────────────────────────────────
 
+file(GLOB WEBAUDIO_SRC src/webaudio/*.cpp src/webaudio/nodes/*.cpp src/webaudio/utils/*.cpp)
+
 add_library(jsgame_libretro SHARED
     src/libretro.c
     src/node_host.cpp
     src/binding_gl.cpp
+    src/binding_audio.cpp
+    ${WEBAUDIO_SRC}
 )
+# vendored decoder headers (uaac AAC tables) trip gcc's C++ narrowing errors
+set_source_files_properties(src/webaudio/audio_decoders.cpp PROPERTIES COMPILE_OPTIONS "-Wno-narrowing")
+# webaudio engine sources include <emscripten.h> for EMSCRIPTEN_KEEPALIVE only
+set_source_files_properties(${WEBAUDIO_SRC} src/binding_audio.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/emshim;${CMAKE_CURRENT_SOURCE_DIR}/deps/simde;${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # RetroArch expects "jsgame_libretro.so", not "libjsgame_libretro.so"
 set_target_properties(jsgame_libretro PROPERTIES PREFIX "")

@@ -30,7 +30,9 @@ export class OscillatorNode extends AudioNode {
         );
         this.detune = new AudioParam(context, nodeId, 'detune', detune, -4800.0, 4800.0);
 
-        this._type = type;
+        // jsgame patch: go through the setter so setNodeParameter reaches the
+        // engine — createNode ignores options, and the C++ default is sawtooth.
+        this.type = type;
         this._started = false;
         this._stopped = false;
         this.onended = null;

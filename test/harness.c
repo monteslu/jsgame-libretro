@@ -89,10 +89,18 @@ static void video_cb(const void* data, unsigned width, unsigned height, size_t p
 }
 
 static int16_t g_audio_peak;
+static int g_audio_maxjump;   /* max |delta| between consecutive L samples,
+                                 across batch boundaries too — a 440Hz sine
+                                 at 48k peaks ~943; garbage shows ~30000 */
+static int g_last_l = 0;
 static size_t audio_batch_cb(const int16_t* data, size_t frames) {
-    for (size_t i = 0; data && i < frames * 2; i++) {
-        int16_t v = data[i] < 0 ? -data[i] : data[i];
-        if (v > g_audio_peak) g_audio_peak = v;
+    for (size_t i = 0; data && i < frames; i++) {
+        int16_t l = data[i * 2];
+        int16_t a = l < 0 ? -l : l;
+        if (a > g_audio_peak) g_audio_peak = a;
+        int jump = l - g_last_l; if (jump < 0) jump = -jump;
+        if (g_audio_frames + i > 0 && jump > g_audio_maxjump) g_audio_maxjump = jump;
+        g_last_l = l;
     }
     g_audio_frames += frames;
     return frames;
@@ -182,7 +190,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "FAIL: no framebuffer presented after 30 frames\n");
         return 1;
     }
-    printf("framebuffer: %ux%u, audio frames: %zu, audio peak: %d\n", g_fb_w, g_fb_h, g_audio_frames, g_audio_peak);
+    printf("framebuffer: %ux%u, audio frames: %zu, audio peak: %d, audio maxjump: %d\n", g_fb_w, g_fb_h, g_audio_frames, g_audio_peak, g_audio_maxjump);
 
     // Diagnostic bars from bootstrap.js: red @ (100,80), green @ (260,80), blue @ (420,80)
     uint32_t red = g_fb[80 * g_fb_w + 100] & 0xFFFFFF;
