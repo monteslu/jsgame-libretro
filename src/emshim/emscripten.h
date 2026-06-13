@@ -3,6 +3,9 @@
 #ifndef JSG_EMSCRIPTEN_SHIM_H
 #define JSG_EMSCRIPTEN_SHIM_H
 
+#ifdef _MSC_VER
+#define _USE_MATH_DEFINES  // M_PI for <cmath>
+#endif
 #include <cstdint>
 #include <cstring>
 #include <cmath>
