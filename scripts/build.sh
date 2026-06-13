@@ -24,7 +24,8 @@ if [ "$(uname)" = "Darwin" ] && [ -f "$LIBCANVAS_A" ]; then
     rm -f "$DEDUP"
     # ar with deterministic names; duplicate basenames extracted by ar get
     # numeric suffixes — collapse to first of each logical object.
-    ( cd "$TMP" && ar qcs "$DEDUP" $(ls -1 | sort -u) )
+    # exclude macOS's __.SYMDEF* table-of-contents pseudo-members
+    ( cd "$TMP" && ar qcs "$DEDUP" $(ls -1 | grep -vE '^__\.SYMDEF' | sort -u) )
     LIBCANVAS_A="$DEDUP"
     rm -rf "$TMP"
 fi
