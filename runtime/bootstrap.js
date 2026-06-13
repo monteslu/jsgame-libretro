@@ -66,12 +66,6 @@ globalThis.__jsg_frame = () => {
   realm.fireFrame(io.getPads());
   const t1 = hostPerf.now();
 
-  // Prime ~4 extra video-frames of audio at start so the frontend's buffer
-  // has a cushion against V8 GC / raster spikes (rate control drains it back).
-  if (!audioPrimed && realm.hasAudio()) {
-    const cushion = realm.pullAudio(FRAMES_PER_TICK * 4);
-    if (cushion) { io.pushAudio(cushion); audioPrimed = true; }
-  }
   const audio = realm.pullAudio(FRAMES_PER_TICK);
   if (audio) io.pushAudio(audio);
   const t2 = hostPerf.now();
@@ -84,6 +78,13 @@ globalThis.__jsg_frame = () => {
   const total = t3 - t0;
   if (total > tMax) tMax = total;
   if (total > 16) slowFrames++;
+  if (frame % 120 === 0) {
+    const nowMs = Date.now();
+    if (!globalThis.__lastWall) globalThis.__lastWall = nowMs - 2000;
+    const fps = 120000 / (nowMs - globalThis.__lastWall);
+    globalThis.__lastWall = nowMs;
+    log(`fps(real): ${fps.toFixed(1)}`);
+  }
   if (frame % 600 === 0) {
     log(`timing/600f: cb=${(tCb / 600).toFixed(2)}ms audio=${(tAudio / 600).toFixed(2)}ms ` +
         `present=${(tPresent / 600).toFixed(2)}ms max=${tMax.toFixed(1)}ms slow(>16ms)=${slowFrames}`);

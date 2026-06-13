@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../src/libretro.h"
 
@@ -93,7 +94,9 @@ static int g_audio_maxjump;   /* max |delta| between consecutive L samples,
                                  across batch boundaries too — a 440Hz sine
                                  at 48k peaks ~943; garbage shows ~30000 */
 static int g_last_l = 0;
+static FILE* g_dump;
 static size_t audio_batch_cb(const int16_t* data, size_t frames) {
+    if (g_dump && data) fwrite(data, 4, frames, g_dump);
     for (size_t i = 0; data && i < frames; i++) {
         int16_t l = data[i * 2];
         int16_t a = l < 0 ? -l : l;
@@ -178,7 +181,11 @@ int main(int argc, char** argv) {
     if (g_hw && g_hw->context_reset) g_hw->context_reset();
 #endif
     int frames = argc > 3 ? atoi(argv[3]) : 30;
-    for (int i = 0; i < frames; i++) retro_run();
+    const char* dump = getenv("JSGAME_AUDIO_DUMP");
+    if (dump) g_dump = fopen(dump, "wb");
+    int pace_us = getenv("JSGAME_PACE_MS") ? atoi(getenv("JSGAME_PACE_MS")) * 1000 : 0;
+    for (int i = 0; i < frames; i++) { retro_run(); if (pace_us) usleep(pace_us); }
+    if (g_dump) fclose(g_dump);
 #ifdef JSG_GL
     printf("gl center pixel: %06X\n", g_gl_center);
     printf(g_gl_center ? "PASS\n" : "FAIL: gl center black\n");

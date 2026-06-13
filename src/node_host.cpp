@@ -382,14 +382,24 @@ extern "C" void jsg_host_set_sram(uint8_t* sram, size_t size) {
 }
 
 extern "C" size_t jsg_host_audio(const int16_t** samples) {
-  size_t frames = g_audio_count;
+  // Deliver AT MOST one tick (800 frames) per retro_run — this delivery is
+  // what lets the frontend's audio_sync throttle us. Draining the whole ring
+  // after a fast-forward burst block-stalls the frontend for hundreds of ms
+  // and sets up a starve/burst oscillation (the "rattling machine gun").
+  const size_t TICK = 800;
+  size_t frames = g_audio_count < TICK ? g_audio_count : TICK;
   for (size_t f = 0; f < frames; f++) {
     size_t slot = (g_audio_head + f) % JSG_AUDIO_RING_FRAMES;
     g_audio_out[f * 2] = g_audio_ring[slot * 2];
     g_audio_out[f * 2 + 1] = g_audio_ring[slot * 2 + 1];
   }
   g_audio_head = (g_audio_head + frames) % JSG_AUDIO_RING_FRAMES;
-  g_audio_count = 0;
+  g_audio_count -= frames;
+  // Bound backlog to ~3 ticks: drop oldest so latency can't creep after bursts.
+  while (g_audio_count > TICK * 3) {
+    g_audio_head = (g_audio_head + TICK) % JSG_AUDIO_RING_FRAMES;
+    g_audio_count -= TICK;
+  }
   *samples = g_audio_out;
   return frames;
 }
