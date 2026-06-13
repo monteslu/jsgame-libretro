@@ -72,7 +72,10 @@ if(WIN32)
         # Skia GDI fontmgr (ScriptShape) + XPS (CreateFontPackage) + Rust std
         # (Nt* syscalls): Uniscribe, font-subsetting, and ntdll import libs.
         usp10 fontsub ntdll gdi32 user32 ole32 oleaut32 shell32 advapi32)
-    target_link_options(jsgame_libretro PRIVATE "/WHOLEARCHIVE:${LIBCANVAS_A}")
+    # libcanvas.lib + libnode.lib both bundle zlib/harfbuzz objects (dup defs);
+    # /FORCE:MULTIPLE is MSVC's --allow-multiple-definition (take first, warn).
+    target_link_options(jsgame_libretro PRIVATE
+        "/WHOLEARCHIVE:${LIBCANVAS_A}" "/FORCE:MULTIPLE")
 elseif(APPLE)
     # Apple ld: -force_load is the whole-archive equivalent (napi-rs ctor
     # registration objects must all be pulled in)
