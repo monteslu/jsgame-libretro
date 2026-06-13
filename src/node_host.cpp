@@ -349,6 +349,29 @@ extern "C" int jsg_host_start(const char* content_path, const char* runtime_dir,
   return 0;
 }
 
+extern "C" void jsg_host_begin(void) {
+  if (!g_bootstrapped || !g_isolate) return;
+  v8::Locker locker(g_isolate);
+  v8::Isolate::Scope isolate_scope(g_isolate);
+  v8::HandleScope handle_scope(g_isolate);
+  v8::Local<v8::Context> ctx = g_setup->context();
+  v8::Context::Scope context_scope(ctx);
+  v8::Local<v8::Value> fn;
+  if (ctx->Global()
+          ->Get(ctx, v8::String::NewFromUtf8Literal(g_isolate, "__jsg_begin"))
+          .ToLocal(&fn) && fn->IsFunction()) {
+    v8::TryCatch tc(g_isolate);
+    (void)fn.As<v8::Function>()->Call(ctx, ctx->Global(), 0, nullptr);
+    if (tc.HasCaught()) {
+      v8::String::Utf8Value m(g_isolate, tc.Exception());
+      logmsg(3, *m ? *m : "jsgame: __jsg_begin threw");
+    }
+  }
+  uv_run(g_setup->event_loop(), UV_RUN_NOWAIT);
+  g_platform->DrainTasks(g_isolate);
+  g_isolate->PerformMicrotaskCheckpoint();
+}
+
 extern "C" int jsg_host_frame(void) {
   if (!g_bootstrapped) return -1;
 

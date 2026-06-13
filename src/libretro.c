@@ -31,6 +31,7 @@ static bool async_audio = false;     // frontend pulls audio on its own thread
 static bool audio_running = false;
 static struct retro_hw_render_callback hw_render;
 static bool gl_active = false;
+static bool jsg_begun = false;
 
 static void core_log(enum retro_log_level level, const char* fmt, ...);
 static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
@@ -151,6 +152,17 @@ static void poll_pads(void) {
 RETRO_API void retro_run(void) {
     input_poll_cb();
     poll_pads();
+
+    // Defer the game entry until GL is actually ready (context_reset fired),
+    // or run it immediately for software. Then normal frames.
+    if (!jsg_begun) {
+        if (!gl_active || jsg_gl_ready()) {
+            jsg_host_begin();
+            jsg_begun = true;
+        } else {
+            return;  // GL requested but context not granted yet; wait a frame
+        }
+    }
 
     jsg_host_frame();
 

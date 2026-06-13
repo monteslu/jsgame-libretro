@@ -40,21 +40,26 @@ if (!entry) {
   logErr('no game entry found (package.json main / main.js / src/main.js / ...)');
 } else {
   log('entry: ' + entry);
-  // Load ESM vendor engines (WebAudio + WebGL2) before the game entry so a
-  // game constructing AudioContext / getContext('webgl2') at boot finds them.
-  Promise.all([
-    import('./vendor/webaudio/LibretroAudioContext.js')
-      .then((m) => { realm.setAudioContextClass(m.LibretroAudioContext); log('webaudio engine ready'); })
-      .catch((e) => logErr('webaudio init failed (stub stays): ' + e.message)),
-    import('./vendor/webgl/webgl2-context.mjs')
-      .then((m) => { realm.setWebGL2Class(m.WebGL2RenderingContext); log('webgl2 ready'); })
-      .catch((e) => logErr('webgl2 init failed: ' + e.message)),
-  ])
-    .then(() => realm.runEntry(entry))
-    .then(
-      () => log('entry evaluated'),
-      (err) => logErr('entry failed: ' + (err && err.stack ? err.stack : String(err)))
-    );
+  // __jsg_begin runs the entry — the CORE calls it (from retro_run) once GL is
+  // ready (context_reset has fired), or immediately for software. This avoids
+  // getContext('webgl2') racing ahead of the frontend's async context grant.
+  let begun = false;
+  globalThis.__jsg_begin = () => {
+    if (begun) return; begun = true;
+    Promise.all([
+      import('./vendor/webaudio/LibretroAudioContext.js')
+        .then((m) => { realm.setAudioContextClass(m.LibretroAudioContext); log('webaudio engine ready'); })
+        .catch((e) => logErr('webaudio init failed (stub stays): ' + e.message)),
+      import('./vendor/webgl/webgl2-context.mjs')
+        .then((m) => { realm.setWebGL2Class(m.WebGL2RenderingContext); log('webgl2 ready'); })
+        .catch((e) => logErr('webgl2 init failed: ' + e.message)),
+    ])
+      .then(() => realm.runEntry(entry))
+      .then(
+        () => log('entry evaluated'),
+        (err) => logErr('entry failed: ' + (err && err.stack ? err.stack : String(err)))
+      );
+  };
 }
 
 let frame = 0;

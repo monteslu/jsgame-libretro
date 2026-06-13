@@ -47,6 +47,11 @@ void jsg_host_set_audio_backpressure(bool enable);
 // Returns frame count (0 = emit silence) and resets the pending buffer.
 size_t jsg_host_audio(const int16_t** samples);
 
+// Run the game entry. Called once by the core: after context_reset for GL
+// games, or on the first frame for software. Deferred so getContext('webgl2')
+// doesn't race the frontend's async GL-context grant.
+void jsg_host_begin(void);
+
 // GL proc table from the frontend's hw render context (binding_gl.cpp).
 void jsg_gl_set_procs(void* get_proc_address, uintptr_t default_fbo);
 bool jsg_gl_ready(void);
