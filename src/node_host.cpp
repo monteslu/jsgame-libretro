@@ -56,9 +56,14 @@ static jsg_pad_t g_pads[4];
 static uint8_t* g_sram = nullptr;
 static size_t g_sram_size = 0;
 
-#define JSG_MAX_AUDIO_FRAMES 4096
-static int16_t g_audio[JSG_MAX_AUDIO_FRAMES * 2];
-static size_t g_audio_frames = 0;  // frames pushed this video frame
+// Audio ring: JS pushes render output, retro_run drains everything pending.
+// Accumulating (not overwriting) means a late video frame delivers queued
+// audio instead of a 16ms silence pop.
+#define JSG_AUDIO_RING_FRAMES 16384
+static int16_t g_audio_ring[JSG_AUDIO_RING_FRAMES * 2];
+static size_t g_audio_head = 0;  // frames
+static size_t g_audio_count = 0; // frames pending
+static int16_t g_audio_out[JSG_AUDIO_RING_FRAMES * 2];
 
 static void logmsg(int level, const char* msg) {
   if (g_log) g_log(level, msg);
@@ -160,9 +165,13 @@ static napi_value io_push_audio(napi_env env, napi_callback_info info) {
   napi_get_typedarray_info(env, argv[0], &type, &len, &data, &ab, &offset);
   if (!data || type != napi_int16_array) return nullptr;
   size_t frames = len / 2;
-  if (frames > JSG_MAX_AUDIO_FRAMES) frames = JSG_MAX_AUDIO_FRAMES;
-  memcpy(g_audio, data, frames * 2 * sizeof(int16_t));
-  g_audio_frames = frames;
+  const int16_t* src = (const int16_t*)data;
+  for (size_t f = 0; f < frames && g_audio_count < JSG_AUDIO_RING_FRAMES; f++) {
+    size_t slot = (g_audio_head + g_audio_count) % JSG_AUDIO_RING_FRAMES;
+    g_audio_ring[slot * 2] = src[f * 2];
+    g_audio_ring[slot * 2 + 1] = src[f * 2 + 1];
+    g_audio_count++;
+  }
   return nullptr;
 }
 
@@ -370,9 +379,15 @@ extern "C" void jsg_host_set_sram(uint8_t* sram, size_t size) {
 }
 
 extern "C" size_t jsg_host_audio(const int16_t** samples) {
-  *samples = g_audio;
-  size_t frames = g_audio_frames;
-  g_audio_frames = 0;  // consumed; absent a push next frame we emit silence
+  size_t frames = g_audio_count;
+  for (size_t f = 0; f < frames; f++) {
+    size_t slot = (g_audio_head + f) % JSG_AUDIO_RING_FRAMES;
+    g_audio_out[f * 2] = g_audio_ring[slot * 2];
+    g_audio_out[f * 2 + 1] = g_audio_ring[slot * 2 + 1];
+  }
+  g_audio_head = (g_audio_head + frames) % JSG_AUDIO_RING_FRAMES;
+  g_audio_count = 0;
+  *samples = g_audio_out;
   return frames;
 }
 

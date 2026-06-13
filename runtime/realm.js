@@ -482,9 +482,12 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
   return {
     displayCanvas,
     setAudioContextClass(cls) { RealAudioContextClass = cls; },
+    hasAudio() { return liveContexts.some((c) => c.state === 'running'); },
     pullAudio(numFrames) {
       const ctx = liveContexts.find((c) => c.state === 'running');
-      return ctx ? ctx.pullFrames(numFrames) : null;
+      if (!ctx) return null;
+      // Reused buffer — pushAudio copies synchronously, safe.
+      return ctx.pullFrames(numFrames);
     },
     async runEntry(entryPath) {
       const mod = loadModule(entryPath);

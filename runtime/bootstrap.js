@@ -56,16 +56,39 @@ if (!entry) {
 }
 
 let frame = 0;
+let audioPrimed = false;
+let tCb = 0, tAudio = 0, tPresent = 0, tMax = 0, slowFrames = 0;
+const { performance: hostPerf } = require('node:perf_hooks');
 
 globalThis.__jsg_frame = () => {
   frame++;
+  const t0 = hostPerf.now();
   realm.fireFrame(io.getPads());
+  const t1 = hostPerf.now();
 
+  // Prime ~4 extra video-frames of audio at start so the frontend's buffer
+  // has a cushion against V8 GC / raster spikes (rate control drains it back).
+  if (!audioPrimed && realm.hasAudio()) {
+    const cushion = realm.pullAudio(FRAMES_PER_TICK * 4);
+    if (cushion) { io.pushAudio(cushion); audioPrimed = true; }
+  }
   const audio = realm.pullAudio(FRAMES_PER_TICK);
   if (audio) io.pushAudio(audio);
+  const t2 = hostPerf.now();
 
   const canvas = realm.displayCanvas;
   io.present(canvas.data(), canvas.width, canvas.height);
+  const t3 = hostPerf.now();
+
+  tCb += t1 - t0; tAudio += t2 - t1; tPresent += t3 - t2;
+  const total = t3 - t0;
+  if (total > tMax) tMax = total;
+  if (total > 16) slowFrames++;
+  if (frame % 600 === 0) {
+    log(`timing/600f: cb=${(tCb / 600).toFixed(2)}ms audio=${(tAudio / 600).toFixed(2)}ms ` +
+        `present=${(tPresent / 600).toFixed(2)}ms max=${tMax.toFixed(1)}ms slow(>16ms)=${slowFrames}`);
+    tCb = tAudio = tPresent = tMax = 0; slowFrames = 0;
+  }
 
   if (frame === Number(process.env.JSGAME_DUMP_FRAME || 0) && process.env.JSGAME_DUMP_PNG) {
     try {
