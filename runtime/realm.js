@@ -23,8 +23,27 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
       if (listeners[type]) listeners[type] = listeners[type].filter((f) => f !== fn);
     };
     canvas.getContext = function getContext(type) {
+      if (type === 'webgl2' || type === 'webgl') {
+        const glb = process._linkedBinding('jsgame_gl');
+        if (!glb.ready()) {
+          logErr('getContext(webgl2): no HW render context (set JSGAME_GL=1)');
+          return null;
+        }
+        // S5 spike surface: raw binding + the constants the spike needs.
+        // Phase 3 replaces this with a full WebGL2RenderingContext.
+        const gl = Object.assign(Object.create(null), glb, {
+          canvas,
+          VERTEX_SHADER: 0x8b31, FRAGMENT_SHADER: 0x8b30,
+          COMPILE_STATUS: 0x8b81, LINK_STATUS: 0x8b82,
+          ARRAY_BUFFER: 0x8892, STATIC_DRAW: 0x88e4,
+          COLOR_BUFFER_BIT: 0x4000, DEPTH_BUFFER_BIT: 0x100,
+          TRIANGLES: 0x0004, FLOAT: 0x1406,
+        });
+        canvas._isWebGL = true;
+        return gl;
+      }
       if (type !== '2d') {
-        logErr('getContext(' + type + ') unsupported (Phase 3: webgl2)');
+        logErr('getContext(' + type + ') unsupported');
         return null;
       }
       if (!ctx) {

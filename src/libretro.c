@@ -27,6 +27,19 @@ static struct retro_log_callback log_cb_struct;
 static retro_log_printf_t log_cb;
 
 static bool content_loaded = false;
+static struct retro_hw_render_callback hw_render;
+static bool gl_active = false;
+
+static void core_log(enum retro_log_level level, const char* fmt, ...);
+
+static void context_reset(void) {
+    jsg_gl_set_procs((void*)hw_render.get_proc_address,
+                     (uintptr_t)hw_render.get_current_framebuffer());
+    core_log(RETRO_LOG_INFO, "GL context ready");
+}
+static void context_destroy(void) {
+    core_log(RETRO_LOG_INFO, "GL context destroyed");
+}
 static unsigned cur_width = DEFAULT_WIDTH;
 static unsigned cur_height = DEFAULT_HEIGHT;
 static uint8_t sram[SRAM_SIZE];
@@ -128,6 +141,15 @@ RETRO_API void retro_run(void) {
 
     jsg_host_frame();
 
+    if (gl_active && jsg_gl_ready()) {
+        video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
+        const int16_t* gl_samples = NULL;
+        size_t gl_frames = jsg_host_audio(&gl_samples);
+        if (gl_frames > 0) audio_batch_cb(gl_samples, gl_frames);
+        else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
+        return;
+    }
+
     unsigned w = 0, h = 0;
     const uint32_t* fb = jsg_host_framebuffer(&w, &h);
     if (fb) {
@@ -159,6 +181,23 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) {
         core_log(RETRO_LOG_ERROR, "XRGB8888 not supported by frontend");
         return false;
+    }
+
+    // S5 spike: opt-in GL via env; Phase 3 negotiates per-game.
+    if (getenv("JSGAME_GL")) {
+        memset(&hw_render, 0, sizeof(hw_render));
+        hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
+        hw_render.context_reset = context_reset;
+        hw_render.context_destroy = context_destroy;
+        hw_render.depth = true;
+        hw_render.stencil = true;
+        hw_render.bottom_left_origin = true;
+        if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
+            gl_active = true;
+            core_log(RETRO_LOG_INFO, "HW render (GLES3) negotiated");
+        } else {
+            core_log(RETRO_LOG_WARN, "HW render refused; staying software");
+        }
     }
 
     const char* runtime_dir = getenv("JSGAME_RUNTIME_DIR");  // dev mode

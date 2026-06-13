@@ -44,6 +44,10 @@ void jsg_host_set_sram(uint8_t* sram, size_t size);
 // Returns frame count (0 = emit silence) and resets the pending buffer.
 size_t jsg_host_audio(const int16_t** samples);
 
+// GL proc table from the frontend's hw render context (binding_gl.cpp).
+void jsg_gl_set_procs(void* get_proc_address, uintptr_t default_fbo);
+bool jsg_gl_ready(void);
+
 // Stop the JS runtime for the current content (environment teardown; V8 stays up).
 void jsg_host_stop(void);
 

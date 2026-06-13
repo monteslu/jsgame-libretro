@@ -12,6 +12,32 @@
 
 #include "../src/libretro.h"
 
+#ifdef JSG_GL
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
+static struct retro_hw_render_callback* g_hw = NULL;
+static uint32_t g_gl_center;
+static uintptr_t harness_get_fb(void) { return 0; }
+static retro_proc_address_t harness_get_proc(const char* sym) {
+    return (retro_proc_address_t)eglGetProcAddress(sym);
+}
+static int egl_init(int w, int h) {
+    EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    eglInitialize(d, NULL, NULL);
+    eglBindAPI(EGL_OPENGL_ES_API);
+    EGLConfig cfg; EGLint n;
+    EGLint attr[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE,
+                     EGL_OPENGL_ES3_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
+                     EGL_BLUE_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_NONE};
+    eglChooseConfig(d, attr, &cfg, 1, &n);
+    EGLint pba[] = {EGL_WIDTH, w, EGL_HEIGHT, h, EGL_NONE};
+    EGLSurface s = eglCreatePbufferSurface(d, cfg, pba);
+    EGLint ca[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLContext c = eglCreateContext(d, cfg, EGL_NO_CONTEXT, ca);
+    return eglMakeCurrent(d, s, s, c) ? 0 : -1;
+}
+#endif
+
 static const uint32_t* g_fb;
 static unsigned g_fb_w, g_fb_h;
 static size_t g_audio_frames;
@@ -33,6 +59,14 @@ static bool env_cb(unsigned cmd, void* data) {
             return true;
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
             return true;
+#ifdef JSG_GL
+        case RETRO_ENVIRONMENT_SET_HW_RENDER: {
+            g_hw = (struct retro_hw_render_callback*)data;
+            g_hw->get_current_framebuffer = harness_get_fb;
+            g_hw->get_proc_address = harness_get_proc;
+            return true;
+        }
+#endif
         default:
             return false;
     }
@@ -40,6 +74,15 @@ static bool env_cb(unsigned cmd, void* data) {
 
 static void video_cb(const void* data, unsigned width, unsigned height, size_t pitch) {
     (void)pitch;
+#ifdef JSG_GL
+    if (data == RETRO_HW_FRAME_BUFFER_VALID) {
+        uint8_t px[4] = {0};
+        glReadPixels(width / 2, height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        g_gl_center = px[0] | (px[1] << 8) | (px[2] << 16);
+        g_fb_w = width; g_fb_h = height;
+        return;
+    }
+#endif
     g_fb = (const uint32_t*)data;
     g_fb_w = width;
     g_fb_h = height;
@@ -114,14 +157,26 @@ int main(int argc, char** argv) {
     retro_set_input_state(input_state_cb);
     retro_init();
 
+#ifdef JSG_GL
+    if (egl_init(640, 480) != 0) { fprintf(stderr, "FAIL: egl\n"); return 1; }
+#endif
     struct retro_game_info game = {.path = argv[2], .data = NULL, .size = 0, .meta = NULL};
     if (!retro_load_game(&game)) {
         fprintf(stderr, "FAIL: retro_load_game\n");
         return 1;
     }
 
+#ifdef JSG_GL
+    if (g_hw && g_hw->context_reset) g_hw->context_reset();
+#endif
     int frames = argc > 3 ? atoi(argv[3]) : 30;
     for (int i = 0; i < frames; i++) retro_run();
+#ifdef JSG_GL
+    printf("gl center pixel: %06X\n", g_gl_center);
+    printf(g_gl_center ? "PASS\n" : "FAIL: gl center black\n");
+    retro_unload_game(); retro_deinit();
+    return g_gl_center ? 0 : 1;
+#endif
 
     if (!g_fb || g_fb_w == 0) {
         fprintf(stderr, "FAIL: no framebuffer presented after 30 frames\n");

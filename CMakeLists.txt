@@ -31,6 +31,7 @@ endif()
 add_library(jsgame_libretro SHARED
     src/libretro.c
     src/node_host.cpp
+    src/binding_gl.cpp
 )
 
 # RetroArch expects "jsgame_libretro.so", not "libjsgame_libretro.so"
