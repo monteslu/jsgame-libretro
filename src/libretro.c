@@ -27,10 +27,13 @@ static struct retro_log_callback log_cb_struct;
 static retro_log_printf_t log_cb;
 
 static bool content_loaded = false;
+static bool async_audio = false;     // frontend pulls audio on its own thread
+static bool audio_running = false;
 static struct retro_hw_render_callback hw_render;
 static bool gl_active = false;
 
 static void core_log(enum retro_log_level level, const char* fmt, ...);
+static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
 
 static void context_reset(void) {
     jsg_gl_set_procs((void*)hw_render.get_proc_address,
@@ -40,10 +43,20 @@ static void context_reset(void) {
 static void context_destroy(void) {
     core_log(RETRO_LOG_INFO, "GL context destroyed");
 }
+
+// Async audio: called on the frontend's AUDIO thread whenever it wants data.
+// Decouples audio writes from the vsync'd video loop (blocking writes inside
+// retro_run serialize with vblank waits and halve the frame rate).
+static void audio_callback(void) {
+    const int16_t* samples = NULL;
+    size_t frames = jsg_host_audio(&samples);
+    if (frames > 0) audio_batch_cb(samples, frames);
+    else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS) / 4);
+}
+static void audio_set_state(bool enable) { audio_running = enable; }
 static unsigned cur_width = DEFAULT_WIDTH;
 static unsigned cur_height = DEFAULT_HEIGHT;
 static uint8_t sram[SRAM_SIZE];
-static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
 
 static void core_log(enum retro_log_level level, const char* fmt, ...) {
     char buf[2048];
@@ -143,10 +156,12 @@ RETRO_API void retro_run(void) {
 
     if (gl_active && jsg_gl_ready()) {
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
-        const int16_t* gl_samples = NULL;
-        size_t gl_frames = jsg_host_audio(&gl_samples);
-        if (gl_frames > 0) audio_batch_cb(gl_samples, gl_frames);
-        else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
+        if (!async_audio) {
+            const int16_t* gl_samples = NULL;
+            size_t gl_frames = jsg_host_audio(&gl_samples);
+            if (gl_frames > 0) audio_batch_cb(gl_samples, gl_frames);
+            else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
+        }
         return;
     }
 
@@ -168,10 +183,12 @@ RETRO_API void retro_run(void) {
         video_cb(NULL, cur_width, cur_height, cur_width * sizeof(uint32_t));
     }
 
-    const int16_t* samples = NULL;
-    size_t frames = jsg_host_audio(&samples);
-    if (frames > 0) audio_batch_cb(samples, frames);
-    else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
+    if (!async_audio) {
+        const int16_t* samples = NULL;
+        size_t frames = jsg_host_audio(&samples);
+        if (frames > 0) audio_batch_cb(samples, frames);
+        else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
+    }
 }
 
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {
@@ -206,6 +223,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
                  "JSGAME_RUNTIME_DIR not set (embedded runtime not wired yet)");
         return false;
     }
+
+    struct retro_audio_callback audio_cb_desc = { audio_callback, audio_set_state };
+    async_audio = environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK, &audio_cb_desc);
+    core_log(RETRO_LOG_INFO, "async audio: %s", async_audio ? "yes" : "no (sync fallback)");
 
     jsg_host_set_sram(sram, SRAM_SIZE);
     core_log(RETRO_LOG_INFO, "loading content: %s", game->path);

@@ -24,6 +24,7 @@ const SnapshotData* SnapshotBuilder::GetEmbeddedSnapshotData() { return nullptr;
 #include <string.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,7 @@ static int16_t g_audio_ring[JSG_AUDIO_RING_FRAMES * 2];
 static size_t g_audio_head = 0;  // frames
 static size_t g_audio_count = 0; // frames pending
 static int16_t g_audio_out[JSG_AUDIO_RING_FRAMES * 2];
+static std::mutex g_audio_mtx;  // ring shared with the frontend audio thread
 
 static void logmsg(int level, const char* msg) {
   if (g_log) g_log(level, msg);
@@ -168,6 +170,7 @@ static napi_value io_push_audio(napi_env env, napi_callback_info info) {
   if (!data || type != napi_int16_array) return nullptr;
   size_t frames = len / 2;
   const int16_t* src = (const int16_t*)data;
+  std::lock_guard<std::mutex> lk(g_audio_mtx);
   for (size_t f = 0; f < frames && g_audio_count < JSG_AUDIO_RING_FRAMES; f++) {
     size_t slot = (g_audio_head + g_audio_count) % JSG_AUDIO_RING_FRAMES;
     g_audio_ring[slot * 2] = src[f * 2];
@@ -382,6 +385,7 @@ extern "C" void jsg_host_set_sram(uint8_t* sram, size_t size) {
 }
 
 extern "C" size_t jsg_host_audio(const int16_t** samples) {
+  std::lock_guard<std::mutex> lk(g_audio_mtx);
   // Deliver AT MOST one tick (800 frames) per retro_run — this delivery is
   // what lets the frontend's audio_sync throttle us. Draining the whole ring
   // after a fast-forward burst block-stalls the frontend for hundreds of ms
