@@ -137,6 +137,31 @@ else()
     )
 endif()
 
+# ── GLES3/EGL for the WebGL2 binding (gl_bindings.cpp) ───────────────────
+# System on Linux, NDK on Android, ANGLE on macOS/Windows (set -DANGLE_DIR).
+set(ANGLE_DIR "" CACHE PATH "Path to ANGLE (include/ + lib/) for macOS/Windows GLES3")
+if(ANGLE_DIR AND EXISTS "${ANGLE_DIR}/include")
+    target_include_directories(jsgame_libretro PRIVATE ${ANGLE_DIR}/include)
+    if(APPLE)
+        target_link_libraries(jsgame_libretro PRIVATE
+            ${ANGLE_DIR}/lib/libEGL.dylib ${ANGLE_DIR}/lib/libGLESv2.dylib)
+    elseif(WIN32)
+        target_link_libraries(jsgame_libretro PRIVATE
+            ${ANGLE_DIR}/lib/libEGL.lib ${ANGLE_DIR}/lib/libGLESv2.lib)
+    endif()
+elseif(ANDROID)
+    target_link_libraries(jsgame_libretro PRIVATE GLESv3 EGL)
+elseif(NOT WIN32 AND NOT APPLE)
+    find_library(GLESV2_LIB GLESv2)
+    find_library(EGL_LIB EGL)
+    if(GLESV2_LIB)
+        target_link_libraries(jsgame_libretro PRIVATE ${GLESV2_LIB})
+    endif()
+    if(EGL_LIB)
+        target_link_libraries(jsgame_libretro PRIVATE ${EGL_LIB})
+    endif()
+endif()
+
 if(NOT MSVC)
     target_compile_options(jsgame_libretro PRIVATE -Wno-unused-parameter -fvisibility=hidden)
 endif()
