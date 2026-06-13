@@ -39,6 +39,8 @@ function dirContent(root, name) {
   };
   return {
     name,
+    root,
+    isZip: false,
     read,
     exists: (rel) => read(rel) !== null,
     // vite convention: static assets live in public/ and are addressed from root
@@ -64,6 +66,9 @@ function zipContent(zipPath) {
   };
   return {
     name: path.basename(zipPath, path.extname(zipPath)),
+    root: null,
+    isZip: true,
+    zipPath,
     read,
     exists: (rel) => read(rel) !== null,
     asset: (rel) => (hasPublic ? read('public/' + normalize(rel)) ?? read(rel) : read(rel)),

@@ -212,8 +212,20 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return false;
     }
 
-    // S5 spike: opt-in GL via env; Phase 3 negotiates per-game.
-    if (getenv("JSGAME_GL")) {
+    // GL is opt-in per game: the .jsg marker (or JSGAME_GL env for dev) declares
+    // it via {"webgl":true}. We must decide BEFORE bootstrap runs (the HW
+    // context is requested here, in retro_load_game). 2D games skip GL so the
+    // frontend keeps the software framebuffer path.
+    bool wants_gl = getenv("JSGAME_GL") != NULL;
+    if (!wants_gl) {
+        FILE* mf = fopen(game->path, "rb");
+        if (mf) {
+            char mbuf[512]; size_t n = fread(mbuf, 1, sizeof(mbuf) - 1, mf); fclose(mf);
+            mbuf[n] = 0;
+            if (strstr(mbuf, "\"webgl\"") && strstr(mbuf, "true")) wants_gl = true;
+        }
+    }
+    if (wants_gl) {
         // Ask the frontend which GL API it provides (GET_PREFERRED_HW_RENDER),
         // rather than guessing per-target. Our WebGL2 binding (gl_bindings.cpp)
         // speaks GLES3 only — it calls GLES entry points (glClearDepthf,

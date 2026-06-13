@@ -9,7 +9,8 @@ const vm = require('node:vm');
 // std buttons[i] reads retro bit STD_TO_RETRO[i]; -1 = always unpressed.
 const STD_TO_RETRO = [0, 8, 1, 9, 10, 11, 12, 13, 2, 3, 14, 15, 4, 5, 6, 7, -1];
 
-function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
+function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPolicy, runtimeDir }) {
+  netPolicy = netPolicy || 'off';  // off | websocket | full
   const { createCanvas: nativeCreateCanvas, Image: NativeImage, loadImage: nativeLoadImage, GlobalFonts } = canvasLib;
 
   // ── canvas factory (port of jsgamelauncher canvas.js, 2D only) ──────────
@@ -184,6 +185,16 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
     get length() { return store.size; },
   };
 
+  // ── Keyboard (events fed by the core from RETRO_KEYBOARD_CALLBACK) ──────
+  const keyListeners = { keydown: [], keyup: [] };
+  function dispatchKey(type, code, key, pressed) {
+    const ev = { type, code, key, repeat: false, preventDefault() {}, stopPropagation() {},
+                 altKey: false, ctrlKey: false, shiftKey: false, metaKey: false };
+    for (const fn of keyListeners[type]) { try { fn(ev); } catch (e) { logErr('key handler: ' + e.message); } }
+    if (type === 'keydown' && typeof sandbox.onkeydown === 'function') sandbox.onkeydown(ev);
+    if (type === 'keyup' && typeof sandbox.onkeyup === 'function') sandbox.onkeyup(ev);
+  }
+
   // ── Gamepad API over RetroPad ───────────────────────────────────────────
   let padSnapshot = new Int32Array(4 * 8);
   function getGamepads() {
@@ -285,6 +296,69 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
     async close() { this.state = 'closed'; }
   }
 
+  // ── WebSocket façade (privileged realm owns the real socket) ───────────
+  class GameWebSocket {
+    constructor(url, protocols) {
+      this.url = String(url);
+      this.readyState = 0; // CONNECTING
+      this.bufferedAmount = 0;
+      this._listeners = {};
+      if (netPolicy === 'off') {
+        logErr('WebSocket blocked (network policy: off): ' + this.url);
+        setTimeout(() => { this.readyState = 3; this._emit('error', {}); this._emit('close', { code: 1006 }); }, 0);
+        return;
+      }
+      try {
+        this._ws = new WebSocket(this.url, protocols);  // Node global, privileged
+        this._ws.binaryType = 'arraybuffer';
+        this._ws.addEventListener('open', () => { this.readyState = 1; this._emit('open', {}); });
+        this._ws.addEventListener('message', (e) => this._emit('message', { data: e.data }));
+        this._ws.addEventListener('close', (e) => { this.readyState = 3; this._emit('close', { code: e.code, reason: e.reason }); });
+        this._ws.addEventListener('error', () => this._emit('error', {}));
+      } catch (e) {
+        logErr('WebSocket open failed: ' + e.message);
+        setTimeout(() => { this.readyState = 3; this._emit('error', {}); }, 0);
+      }
+    }
+    send(data) { if (this._ws && this.readyState === 1) this._ws.send(data); }
+    close(code, reason) { if (this._ws) this._ws.close(code, reason); }
+    addEventListener(t, fn) { (this._listeners[t] = this._listeners[t] || []).push(fn); }
+    removeEventListener(t, fn) { if (this._listeners[t]) this._listeners[t] = this._listeners[t].filter((f) => f !== fn); }
+    _emit(t, ev) {
+      ev.type = t;
+      const on = this['on' + t]; if (typeof on === 'function') { try { on(ev); } catch (e) { logErr(e.message); } }
+      for (const fn of (this._listeners[t] || [])) { try { fn(ev); } catch (e) { logErr(e.message); } }
+    }
+    get CONNECTING() { return 0; } get OPEN() { return 1; } get CLOSING() { return 2; } get CLOSED() { return 3; }
+  }
+  GameWebSocket.CONNECTING = 0; GameWebSocket.OPEN = 1; GameWebSocket.CLOSING = 2; GameWebSocket.CLOSED = 3;
+
+  // ── Worker shim (worker_threads + our worker-bootstrap) ────────────────
+  const { Worker: NodeWorker } = require('node:worker_threads');
+  const path = require('node:path');
+  class GameWorker {
+    constructor(scriptUrl) {
+      this._listeners = { message: [], error: [] };
+      // Resolve the worker script to a real path inside the game (dir mode) or
+      // extract from zip to a temp; for now support dir-mode relative scripts.
+      const rel = String(scriptUrl).replace(/^\.?\//, '');
+      this._worker = new NodeWorker(path.join(runtimeDir, 'worker-bootstrap.js'), {
+        workerData: { script: rel, gameRoot: content.root || null, isZip: !!content.isZip },
+      });
+      this._worker.on('message', (data) => this._emit('message', { data }));
+      this._worker.on('error', (err) => this._emit('error', { message: err.message }));
+    }
+    postMessage(data, transfer) { this._worker.postMessage(data, transfer); }
+    terminate() { this._worker.terminate(); }
+    addEventListener(t, fn) { (this._listeners[t] = this._listeners[t] || []).push(fn); }
+    removeEventListener(t, fn) { if (this._listeners[t]) this._listeners[t] = this._listeners[t].filter((f) => f !== fn); }
+    _emit(t, ev) {
+      ev.type = t;
+      const on = this['on' + t]; if (typeof on === 'function') { try { on(ev); } catch (e) { logErr(e.message); } }
+      for (const fn of (this._listeners[t] || [])) { try { fn(ev); } catch (e) { logErr(e.message); } }
+    }
+  }
+
   // ── synthetic frame clock + rAF ─────────────────────────────────────────
   let now = 0; // ms, advances 1000/60 per frame
   const realmPerformance = { now: () => now, timeOrigin: 0 };
@@ -316,8 +390,8 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
     createElementNS: (_ns, name) => document.createElement(name),
     createTextNode: (text) => ({ nodeValue: text }),
     hasFocus: () => true,
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: (type, fn) => { if (keyListeners[type]) keyListeners[type].push(fn); },
+    removeEventListener: (type, fn) => { if (keyListeners[type]) keyListeners[type] = keyListeners[type].filter((f) => f !== fn); },
     body: {
       appendChild: () => {},
       removeChild: () => {},
@@ -407,13 +481,15 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
     },
     HTMLCanvasElement: Object.getPrototypeOf(displayCanvas).constructor,
     WebAssembly,
+    WebSocket: GameWebSocket,
+    Worker: GameWorker,
     structuredClone,
     btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
     atob: (s) => Buffer.from(s, 'base64').toString('binary'),
     MutationObserver: class { observe() {} disconnect() {} },
     ResizeObserver: class { observe() {} disconnect() {} unobserve() {} },
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: (type, fn) => { if (keyListeners[type]) keyListeners[type].push(fn); },
+    removeEventListener: (type, fn) => { if (keyListeners[type]) keyListeners[type] = keyListeners[type].filter((f) => f !== fn); },
     dispatchEvent: () => true,
     requestIdleCallback: (cb) => setTimeout(() => cb({ timeRemaining: () => 10 }), 0),
     cancelIdleCallback: clearTimeout,
@@ -484,6 +560,7 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr }) {
     displayCanvas,
     setAudioContextClass(cls) { RealAudioContextClass = cls; },
     setWebGL2Class(cls) { WebGL2Ctx = cls; },
+    dispatchKey,
     hasAudio() { return liveContexts.some((c) => c.state === 'running'); },
     pullAudio(numFrames) {
       const ctx = liveContexts.find((c) => c.state === 'running');

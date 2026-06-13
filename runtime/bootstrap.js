@@ -22,16 +22,18 @@ const content = createContent(contentPath);
 
 // Optional per-game config in the .jsg/.jsgame (JSON: {width, height})
 let width = 640, height = 480;
+let netPolicy = 'off';  // off | websocket | full
 try {
   const marker = require('node:fs').readFileSync(contentPath, 'utf8');
   const cfg = JSON.parse(marker);
   if (cfg.width > 0 && cfg.width <= 1920) width = cfg.width | 0;
   if (cfg.height > 0 && cfg.height <= 1080) height = cfg.height | 0;
+  if (cfg.network) netPolicy = String(cfg.network);
 } catch { /* empty/non-JSON marker = defaults */ }
 
 log(`content: ${content.name} (${width}x${height})`);
 
-const realm = buildRealm({ content, io, canvasLib, width, height, log, logErr });
+const realm = buildRealm({ content, io, canvasLib, width, height, log, logErr, netPolicy, runtimeDir: globalThis.__jsg_paths.runtime });
 
 const FRAMES_PER_TICK = 800; // 48000 / 60
 
