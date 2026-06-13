@@ -34,8 +34,11 @@ extern "C" napi_value napi_register_module_v1(napi_env env, napi_value exports);
 
 // ─── Module state ────────────────────────────────────────────────────────
 
-static std::unique_ptr<node::MultiIsolatePlatform> g_platform;
-static std::unique_ptr<node::CommonEnvironmentSetup> g_setup;
+// Deliberately leaked (raw new, never deleted): static-dtor teardown of the
+// Environment runs napi finalizers after Rust TLS is destroyed → abort at
+// process exit (napi-rs raw_finalize_unchecked). The OS reclaims at exit.
+static node::MultiIsolatePlatform* g_platform = nullptr;
+static node::CommonEnvironmentSetup* g_setup = nullptr;
 static v8::Isolate* g_isolate = nullptr;
 static node::Environment* g_env = nullptr;
 static bool g_v8_initialized = false;
@@ -231,14 +234,15 @@ static int v8_init() {
   for (const std::string& err : result->errors()) logmsg(3, err.c_str());
   if (result->early_return() != 0) return -1;
 
-  g_platform = node::MultiIsolatePlatform::Create(4);
-  v8::V8::InitializePlatform(g_platform.get());
+  g_platform = node::MultiIsolatePlatform::Create(4).release();
+  v8::V8::InitializePlatform(g_platform);
   v8::V8::Initialize();
 
   std::vector<std::string> errors;
   std::vector<std::string> exec_args;
-  g_setup = node::CommonEnvironmentSetup::Create(g_platform.get(), &errors, args,
-                                                 exec_args);
+  g_setup = node::CommonEnvironmentSetup::Create(g_platform, &errors, args,
+                                                 exec_args)
+                .release();
   if (!g_setup) {
     for (const std::string& err : errors) logmsg(3, err.c_str());
     return -1;
