@@ -64,7 +64,13 @@ void jsg_host_begin(void);
 
 // GL proc table from the frontend's hw render context (binding_gl.cpp).
 void jsg_gl_set_procs(void* get_proc_address, uintptr_t default_fbo);
+// Live per-frame default-framebuffer getter (RetroArch's FBO can change each frame).
+void jsg_gl_set_fb_getter(void* get_current_framebuffer);
 bool jsg_gl_ready(void);
+
+// Tell the GL binding it's on a DESKTOP GL core context (not GLES), so it
+// translates "#version 300 es" shaders to "#version 330 core" (gl_bindings.cpp).
+void jsg_gl_set_desktop(int on);
 
 // Stop the JS runtime for the current content (environment teardown; V8 stays up).
 void jsg_host_stop(void);

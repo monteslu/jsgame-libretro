@@ -2,3 +2,7 @@ build/
 deps/
 node_modules/
 *.log
+
+# built game packages (rebuild from source dirs)
+*.jsgame
+test-games/three-game/three.module.js

@@ -41,6 +41,9 @@ static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
 static void context_reset(void) {
     jsg_gl_set_procs((void*)hw_render.get_proc_address,
                      (uintptr_t)hw_render.get_current_framebuffer());
+    // RetroArch's default FBO can change per frame — give the GL binding the
+    // live getter so bindFramebuffer(null) always targets the CURRENT FBO.
+    jsg_gl_set_fb_getter((void*)hw_render.get_current_framebuffer);
     core_log(RETRO_LOG_INFO, "GL context ready");
 }
 static void context_destroy(void) {
@@ -280,28 +283,48 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         // native GLES3; a desktop frontend must offer GLES3 (e.g. via ANGLE).
         enum retro_hw_context_type pref = RETRO_HW_CONTEXT_NONE;
         bool flexible = environ_cb(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER, &pref);
-        bool gles_ok = flexible
-            || pref == RETRO_HW_CONTEXT_OPENGLES3
-            || pref == RETRO_HW_CONTEXT_OPENGLES_VERSION
-            || pref == RETRO_HW_CONTEXT_OPENGLES2;
         core_log(RETRO_LOG_INFO, "preferred HW render: %d (frontend flexible=%d)", (int)pref, (int)flexible);
-        if (gles_ok) {
-            memset(&hw_render, 0, sizeof(hw_render));
-            hw_render.context_type = RETRO_HW_CONTEXT_OPENGLES3;
-            hw_render.context_reset = context_reset;
-            hw_render.context_destroy = context_destroy;
-            hw_render.depth = true;
-            hw_render.stencil = true;
-            hw_render.bottom_left_origin = true;
-            if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
-                gl_active = true;
-                core_log(RETRO_LOG_INFO, "HW render (GLES3) negotiated");
-            }
+
+        // Pick the context type the frontend actually offers. Our WebGL2 binding
+        // is written against GLES3 headers, but every GLES3 entry point it calls
+        // also exists in desktop GL 3.3+ core — EXCEPT 5 (glClearDepthf,
+        // glDepthRangef, glReleaseShaderCompiler, glGetShaderPrecisionFormat,
+        // glShaderBinary), which gl_compat.c shims onto desktop-GL equivalents.
+        // So accept desktop GL-core too: on a desktop frontend (RetroArch's
+        // gl/glcore driver) that's what's on offer; GLES3 frontends (Android,
+        // handhelds, ANGLE) still get GLES3.
+        enum retro_hw_context_type want;
+        if (pref == RETRO_HW_CONTEXT_OPENGL_CORE || pref == RETRO_HW_CONTEXT_OPENGL)
+            want = pref;                                   // honor desktop GL
+        else if (pref == RETRO_HW_CONTEXT_OPENGLES3
+              || pref == RETRO_HW_CONTEXT_OPENGLES_VERSION
+              || pref == RETRO_HW_CONTEXT_OPENGLES2)
+            want = RETRO_HW_CONTEXT_OPENGLES3;             // GLES family -> GLES3
+        else
+            want = RETRO_HW_CONTEXT_OPENGL_CORE;           // flexible/none -> GL core
+
+        memset(&hw_render, 0, sizeof(hw_render));
+        hw_render.context_type = want;
+        if (want == RETRO_HW_CONTEXT_OPENGL_CORE) {
+            hw_render.version_major = 3;                   // GL 3.3 core covers WebGL2
+            hw_render.version_minor = 3;
+        }
+        hw_render.context_reset = context_reset;
+        hw_render.context_destroy = context_destroy;
+        hw_render.depth = true;
+        hw_render.stencil = true;
+        hw_render.bottom_left_origin = true;
+        if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
+            gl_active = true;
+            // Tell the GL binding to translate GLES "#version 300 es" shaders to
+            // desktop "#version 330 core" when we're on a desktop GL context.
+            jsg_gl_set_desktop(want == RETRO_HW_CONTEXT_OPENGL_CORE
+                            || want == RETRO_HW_CONTEXT_OPENGL);
+            core_log(RETRO_LOG_INFO, "HW render negotiated (context type %d)", (int)want);
         }
         if (!gl_active) {
             core_log(RETRO_LOG_WARN,
-                "no GLES3 context available; GL games unavailable on this "
-                "frontend (desktop-GL-only — needs a GLES3/ANGLE build)");
+                "no GL context available; GL games unavailable on this frontend");
         }
     }
 

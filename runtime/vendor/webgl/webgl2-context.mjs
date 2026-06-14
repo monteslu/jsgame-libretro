@@ -629,10 +629,23 @@ export class WebGL2RenderingContext {
     this._gl.glDeleteFramebuffers(1, _tmp1)
   }
 
+  // Make the frontend's live default framebuffer current. Called once at the
+  // start of each frame (realm.fireFrame) so libraries that assume "the default
+  // framebuffer is already bound" (Three.js) render into RetroArch's FBO.
+  _bindDefaultFB() {
+    const id = this._jsgGetDefaultFB ? this._jsgGetDefaultFB() : (this._jsgDefaultFB || 0)
+    this._gl.glBindFramebuffer(GL.FRAMEBUFFER, id)
+    this._boundFramebuffer = null
+    this._boundReadFramebuffer = null
+  }
+
   bindFramebuffer(target, fb) {
     // jsgame: in a libretro core, "null" (the screen) is the FRONTEND's
-    // default framebuffer (get_current_framebuffer()), not GL FBO 0.
-    const id = fb == null ? (this._jsgDefaultFB || 0) : unwrap(fb)
+    // default framebuffer (get_current_framebuffer()), not GL FBO 0. That id
+    // can change per frame, so re-query it live each bind (not a cached value).
+    const id = fb == null
+      ? (this._jsgGetDefaultFB ? this._jsgGetDefaultFB() : (this._jsgDefaultFB || 0))
+      : unwrap(fb)
     this._gl.glBindFramebuffer(target, id)
     if (target === GL.FRAMEBUFFER || target === GL.DRAW_FRAMEBUFFER) this._boundFramebuffer = fb
     if (target === GL.FRAMEBUFFER || target === GL.READ_FRAMEBUFFER) this._boundReadFramebuffer = fb

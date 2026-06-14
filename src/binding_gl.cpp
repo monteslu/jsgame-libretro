@@ -13,19 +13,33 @@ Napi::Object RegisterFullGL(Napi::Env env, Napi::Object exports);
 // readiness + the default framebuffer for the realm's present/FBO logic.
 static void* g_get_proc = nullptr;
 static uintptr_t g_default_fbo = 0;
+// RetroArch's default framebuffer id can CHANGE every frame, so we must call
+// get_current_framebuffer() live rather than cache one value. Without this,
+// bindFramebuffer(null) (e.g. Three.js rendering to screen) targets a stale FBO
+// and nothing reaches the display.
+typedef uintptr_t (*get_cur_fb_fn)(void);
+static get_cur_fb_fn g_get_cur_fb = nullptr;
 
 extern "C" void jsg_gl_set_procs(void* get_proc, uintptr_t default_fbo) {
   g_get_proc = get_proc;
   g_default_fbo = default_fbo;
 }
+extern "C" void jsg_gl_set_fb_getter(void* get_cur_fb) {
+  g_get_cur_fb = (get_cur_fb_fn)get_cur_fb;
+}
 extern "C" bool jsg_gl_ready(void) { return g_get_proc != nullptr; }
-extern "C" uintptr_t jsg_gl_default_fbo(void) { return g_default_fbo; }
 
-// default-framebuffer accessor for the realm (canvas binds null -> this FBO)
+static uintptr_t jsg_gl_live_fbo(void) {
+  return g_get_cur_fb ? g_get_cur_fb() : g_default_fbo;
+}
+extern "C" uintptr_t jsg_gl_default_fbo(void) { return jsg_gl_live_fbo(); }
+
+// default-framebuffer accessor for the realm (canvas binds null -> this FBO).
+// Re-queried each call so a per-frame FBO change is honored.
 static napi_value jsg_gl_default_fb(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value v;
-  napi_create_uint32(env, (uint32_t)g_default_fbo, &v);
+  napi_create_uint32(env, (uint32_t)jsg_gl_live_fbo(), &v);
   return v;
 }
 

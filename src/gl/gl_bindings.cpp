@@ -1,6 +1,32 @@
 #include "gl_bindings.h"
 #include <GLES3/gl3.h>
 #include <vector>
+#include <string>
+
+// Set true when the frontend gave us a DESKTOP GL core context (not GLES).
+// Three.js (and any WebGL2 game) emits "#version 300 es" GLSL with precision
+// qualifiers; a desktop GL core context rejects the "es" dialect, so we
+// translate to "#version 330 core" on the fly. GLES frontends leave this false
+// and shaders pass through untouched. Set from libretro.c after SET_HW_RENDER.
+extern "C" int jsg_gl_is_desktop = 0;
+extern "C" void jsg_gl_set_desktop(int on) { jsg_gl_is_desktop = on; }
+
+// Rewrite a GLES3 "#version 300 es" shader so a desktop GL 3.3 core context
+// accepts it: bump the version line to "330 core". The precision qualifiers
+// (`precision highp float;` etc.) are valid no-ops in desktop GLSL >= 1.30, so
+// they can stay. Leaves non-"300 es" sources (or anything on a GLES context)
+// untouched.
+static std::string jsg_translate_glsl(const std::string& in) {
+    if (!jsg_gl_is_desktop) return in;
+    size_t v = in.find("#version");
+    if (v == std::string::npos) return in;
+    size_t eol = in.find('\n', v);
+    std::string line = in.substr(v, (eol == std::string::npos ? in.size() : eol) - v);
+    if (line.find("300 es") == std::string::npos) return in;
+    std::string out = in;
+    out.replace(v, line.size(), "#version 330 core");
+    return out;
+}
 
 // Helper: read a TypedArray's data pointer
 static inline uint8_t* getArrayData(const Napi::CallbackInfo& info, size_t argIndex) {
@@ -337,14 +363,24 @@ void _deleteShader(const Napi::CallbackInfo& info) {
 
 void _shaderSource(const Napi::CallbackInfo& info) {
     GLuint shader = info[0].As<Napi::Number>().Uint32Value();
-    std::string source = info[1].As<Napi::String>().Utf8Value();
+    std::string source = jsg_translate_glsl(info[1].As<Napi::String>().Utf8Value());
     const char* src = source.c_str();
     GLint length = static_cast<GLint>(source.length());
     glShaderSource(shader, 1, &src, &length);
 }
 
 void _compileShader(const Napi::CallbackInfo& info) {
-    glCompileShader(info[0].As<Napi::Number>().Uint32Value());
+    GLuint sh = info[0].As<Napi::Number>().Uint32Value();
+    glCompileShader(sh);
+    if (jsg_gl_is_desktop) {  // diagnostic: surface compile failures on desktop GL
+        GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            GLint len = 0; glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &len);
+            std::string log(len > 0 ? len : 1, '\0');
+            glGetShaderInfoLog(sh, (GLsizei)log.size(), nullptr, &log[0]);
+            fprintf(stderr, "[jsg-glsl] compile failed: %s\n", log.c_str());
+        }
+    }
 }
 
 Napi::Value _getShaderiv(const Napi::CallbackInfo& info) {
@@ -580,8 +616,9 @@ void _deleteFramebuffers(const Napi::CallbackInfo& info) {
 }
 
 void _bindFramebuffer(const Napi::CallbackInfo& info) {
-    glBindFramebuffer(info[0].As<Napi::Number>().Uint32Value(),
-                      info[1].As<Napi::Number>().Uint32Value());
+    GLenum target = info[0].As<Napi::Number>().Uint32Value();
+    GLuint fb = info[1].As<Napi::Number>().Uint32Value();
+    glBindFramebuffer(target, fb);
 }
 
 Napi::Value _checkFramebufferStatus(const Napi::CallbackInfo& info) {

@@ -38,8 +38,15 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
         if (!glCtx) {
           glCtx = new WebGL2Ctx(glb, canvas.width, canvas.height, { canvas });
           glCtx.canvas = canvas;
-          glCtx._jsgDefaultFB = glb.jsgDefaultFramebuffer ? glb.jsgDefaultFramebuffer() : 0;
+          // RetroArch's default FBO can change per frame — store the live getter
+          // (not a one-time value) so bindFramebuffer(null) always resolves the
+          // CURRENT FBO. Falls back to a cached 0 if the host doesn't expose it.
+          glCtx._jsgGetDefaultFB = glb.jsgDefaultFramebuffer
+            ? () => glb.jsgDefaultFramebuffer()
+            : () => 0;
+          glCtx._jsgDefaultFB = glCtx._jsgGetDefaultFB();
           canvas._isWebGL = true;
+          canvas._glCtx = glCtx;  // for per-frame default-FBO binding
         }
         return glCtx;
       }
@@ -559,7 +566,14 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
   return {
     displayCanvas,
     setAudioContextClass(cls) { RealAudioContextClass = cls; },
-    setWebGL2Class(cls) { WebGL2Ctx = cls; },
+    setWebGL2Class(cls) {
+      WebGL2Ctx = cls;
+      // Expose as a global so libraries that feature-detect WebGL2 by
+      // `typeof WebGL2RenderingContext !== 'undefined'` and
+      // `gl.constructor.name === 'WebGL2RenderingContext'` (e.g. Three.js)
+      // correctly take their WebGL2 path instead of falling back to WebGL1.
+      sandbox.WebGL2RenderingContext = cls;
+    },
     dispatchKey,
     hasAudio() { return liveContexts.some((c) => c.state === 'running'); },
     pullAudio(numFrames) {
@@ -575,6 +589,14 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
     fireFrame(int32Pads) {
       now += 1000 / 60;
       padSnapshot = int32Pads;
+      // Bind the frontend's (live) default framebuffer before the game's frame.
+      // Libraries like Three.js render to "the canvas" assuming the default
+      // framebuffer is already current and never call bindFramebuffer(null);
+      // in a libretro core the real default is RetroArch's per-frame FBO, so we
+      // must make it current each frame or their output goes to an unpresented FBO.
+      if (displayCanvas._glCtx && displayCanvas._glCtx._bindDefaultFB) {
+        displayCanvas._glCtx._bindDefaultFB();
+      }
       if (pendingRaf) {
         const { cb } = pendingRaf;
         pendingRaf = null;

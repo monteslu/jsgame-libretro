@@ -72,6 +72,7 @@ add_library(jsgame_libretro SHARED
     src/binding_audio.cpp
     src/runtime_unzip.c
     src/gl_detect.c
+    src/glibc_compat.c
     src/vendor/miniz.c
     "${EMBEDDED_RUNTIME_C}"
     ${WEBAUDIO_SRC}
@@ -178,6 +179,11 @@ else()
     target_link_options(jsgame_libretro PRIVATE
         -Wl,--allow-multiple-definition
         -Wl,--exclude-libs,ALL   # keep dep symbols out of the dynamic table
+        # Redirect newer-glibc math symbols (skia pulls atan2f/asinf/acosf/
+        # log10f/remainder@GLIBC_2.43) to old versions so the .so loads on
+        # older runtimes (e.g. flatpak glibc 2.42). See src/glibc_compat.c.
+        -Wl,--wrap=atan2f -Wl,--wrap=asinf -Wl,--wrap=acosf
+        -Wl,--wrap=log10f -Wl,--wrap=remainder
     )
 endif()
 
