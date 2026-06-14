@@ -157,14 +157,40 @@ frame — always call `get_current_framebuffer()` live, never cache it, or
 
 ---
 
-## 9. Performance: the gl_blit readback cost
+## 9. Present: GPU composite (no readback) vs the gl_blit fallback
 
-Case B (GL+2D composite) does a GPU→CPU→GPU round-trip (`readPixels` +
-texture re-upload). At 640×480 it's ~1.3ms/frame (`cb` ~1.75ms vs ~0.4ms for a
-GL-native game) — negligible, steady 60fps with ~14ms headroom. **It scales with
-resolution** (~8MB/frame at 1080p) — if a high-res HUD game stutters, the fix is
-to draw the HUD as a GL overlay (camera-pinned textured quad inside the scene)
-instead of the readback path. The 3D itself is always full GPU hardware render.
+There are now TWO Case-B (GL + 2D HUD) present paths:
+
+**GPU composite (preferred, zero readback)** — when libcanvas is the Ganesh
+build (Skia `skia_use_gl=true`). The `drawImage(glCanvas)` GPU path splits the
+frame into TWO GPU textures composited at present, NO GPU→CPU→GPU round-trip:
+1. **scene** → `jsgSceneTexture`: `glBlitFramebuffer` the WebGL FBO into a plain
+   GL texture, presented directly (opaque).
+2. **HUD** → `jsgGpuClearTransparent` on a Skia GPU surface; the game's following
+   `fillText`/`fillRect` form a transparent overlay; present alpha-blends it over
+   the scene (premultiplied `GL_ONE / GL_ONE_MINUS_SRC_ALPHA`).
+Measured `cb` ≈ 0.3–0.6ms (vs ~1.75ms for the readback path). Scene + HUD are
+SEPARATE textures because **Skia GPU draws don't land in an externally raw-written
+texture** — don't try to raw-blit the scene into the Skia surface and have Skia
+composite the HUD on top of it (the scene survives, the HUD/Skia draws don't).
+
+**gl_blit fallback (readback)** — CPU-only libcanvas, or if the GrDirectContext
+fails to init. The old `readPixels` + re-upload path (`src/gl_blit.c`
+`jsg_gl_blit_present`). ~1.3ms/frame at 480p. Still correct, just slower.
+
+**⚠ GL-STANDARD GOTCHA (cost a lot of time):** Skia's `skia_gl_standard` MUST
+match the runtime GL — **`gles` for Android (ship target), `gl` for a desktop
+GL-core context** (the local flatpak RetroArch is desktop GL-core, not GLES,
+despite us requesting GLES3 first). On a MISMATCH, Ganesh emits the wrong shader
+dialect and **every shader-based Skia draw silently no-ops — text/rect/image all
+vanish while `clear()` still works** (clear needs no shader). The raw-GL scene
+path is unaffected (no Skia shaders), so the symptom is "3D scene perfect, HUD
+text missing." Build-libcanvas defaults to `gles`; for a local desktop test
+build set `CANVAS_SKIA_GL_STANDARD=gl`. (Browsers dodge this via ANGLE.)
+
+The full napi-canvas GPU surface API (GrContext from RA's get_proc_address,
+`Surface::new_gpu`, transparent-clear, texture-id) is patched into the upstream
+canvas crate via `build-libcanvas/patches/ganesh-gpu.patch`.
 
 ---
 
