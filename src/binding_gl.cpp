@@ -29,6 +29,7 @@ extern "C" void jsg_gl_set_fb_getter(void* get_cur_fb) {
 }
 extern "C" bool jsg_gl_ready(void) { return g_get_proc != nullptr; }
 
+
 static uintptr_t jsg_gl_live_fbo(void) {
   return g_get_cur_fb ? g_get_cur_fb() : g_default_fbo;
 }

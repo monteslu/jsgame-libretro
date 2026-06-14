@@ -281,7 +281,12 @@ static int v8_init() {
 #endif
   }
 
-  std::vector<std::string> args = {"jsgame"};
+  // --experimental-vm-modules enables vm.SourceTextModule (the realm's ESM
+  // loader). It must be parsed at PROCESS init — pass it in argv here, not just
+  // in the per-Environment exec_args, or Node 26 leaves vm.SourceTextModule
+  // undefined ("is not a constructor"). kDisableNodeOptionsEnv is NOT set, but
+  // NODE_OPTIONS alone proved unreliable for embedders, so this is the source.
+  std::vector<std::string> args = {"jsgame", "--experimental-vm-modules"};
   auto result = node::InitializeOncePerProcess(
       args, {node::ProcessInitializationFlags::kNoInitializeV8,
              node::ProcessInitializationFlags::kNoInitializeNodeV8Platform});
@@ -293,7 +298,11 @@ static int v8_init() {
   v8::V8::Initialize();
 
   std::vector<std::string> errors;
-  std::vector<std::string> exec_args;
+  // --experimental-vm-modules must be passed as a per-Environment exec arg so
+  // vm.SourceTextModule is available to the realm's ESM loader. Node 26 no
+  // longer reliably honors it via NODE_OPTIONS for embedders (the loader then
+  // fails with "vm.SourceTextModule is not a constructor"), so pass it here.
+  std::vector<std::string> exec_args = {"--experimental-vm-modules"};
   g_setup = node::CommonEnvironmentSetup::Create(g_platform, &errors, args,
                                                  exec_args)
                 .release();

@@ -293,34 +293,37 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         // So accept desktop GL-core too: on a desktop frontend (RetroArch's
         // gl/glcore driver) that's what's on offer; GLES3 frontends (Android,
         // handhelds, ANGLE) still get GLES3.
-        enum retro_hw_context_type want;
-        if (pref == RETRO_HW_CONTEXT_OPENGL_CORE || pref == RETRO_HW_CONTEXT_OPENGL)
-            want = pref;                                   // honor desktop GL
-        else if (pref == RETRO_HW_CONTEXT_OPENGLES3
-              || pref == RETRO_HW_CONTEXT_OPENGLES_VERSION
-              || pref == RETRO_HW_CONTEXT_OPENGLES2)
-            want = RETRO_HW_CONTEXT_OPENGLES3;             // GLES family -> GLES3
-        else
-            want = RETRO_HW_CONTEXT_OPENGL_CORE;           // flexible/none -> GL core
-
-        memset(&hw_render, 0, sizeof(hw_render));
-        hw_render.context_type = want;
-        if (want == RETRO_HW_CONTEXT_OPENGL_CORE) {
-            hw_render.version_major = 3;                   // GL 3.3 core covers WebGL2
-            hw_render.version_minor = 3;
-        }
-        hw_render.context_reset = context_reset;
-        hw_render.context_destroy = context_destroy;
-        hw_render.depth = true;
-        hw_render.stencil = true;
-        hw_render.bottom_left_origin = true;
-        if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
-            gl_active = true;
-            // Tell the GL binding to translate GLES "#version 300 es" shaders to
-            // desktop "#version 330 core" when we're on a desktop GL context.
-            jsg_gl_set_desktop(want == RETRO_HW_CONTEXT_OPENGL_CORE
-                            || want == RETRO_HW_CONTEXT_OPENGL);
-            core_log(RETRO_LOG_INFO, "HW render negotiated (context type %d)", (int)want);
+        // GET_PREFERRED_HW_RENDER is unreliable: Android's GLES build reports
+        // RETRO_HW_CONTEXT_OPENGL anyway, so we can't trust it to pick the type.
+        // Instead, actually TRY each context type and keep the first SET_HW_RENDER
+        // that succeeds. Order GLES3 first (Android/ANGLE/handhelds — our native
+        // path), then desktop GL-core 3.3 (desktop Linux RetroArch gl/glcore),
+        // then desktop GL. The frontend rejects mismatches, so this converges to
+        // whatever it actually provides.
+        (void)pref;
+        struct { enum retro_hw_context_type type; unsigned maj, min; bool desktop; } tries[] = {
+            { RETRO_HW_CONTEXT_OPENGLES3,   0, 0, false },
+            { RETRO_HW_CONTEXT_OPENGL_CORE, 3, 3, true  },
+            { RETRO_HW_CONTEXT_OPENGL,      0, 0, true  },
+        };
+        for (size_t i = 0; i < sizeof(tries)/sizeof(tries[0]) && !gl_active; i++) {
+            memset(&hw_render, 0, sizeof(hw_render));
+            hw_render.context_type    = tries[i].type;
+            hw_render.version_major   = tries[i].maj;
+            hw_render.version_minor   = tries[i].min;
+            hw_render.context_reset   = context_reset;
+            hw_render.context_destroy = context_destroy;
+            hw_render.depth           = true;
+            hw_render.stencil         = true;
+            hw_render.bottom_left_origin = true;
+            if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
+                gl_active = true;
+                // Desktop GL needs GLES "#version 300 es" shaders translated to
+                // "#version 330 core"; native GLES3 leaves them untouched.
+                jsg_gl_set_desktop(tries[i].desktop);
+                core_log(RETRO_LOG_INFO, "HW render negotiated (context type %d)",
+                         (int)tries[i].type);
+            }
         }
         if (!gl_active) {
             core_log(RETRO_LOG_WARN,

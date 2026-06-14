@@ -6,3 +6,4 @@ node_modules/
 # built game packages (rebuild from source dirs)
 *.jsgame
 test-games/three-game/three.module.js
+build-android/
