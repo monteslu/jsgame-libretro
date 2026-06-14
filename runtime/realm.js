@@ -45,6 +45,8 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
             ? () => glb.jsgDefaultFramebuffer()
             : () => 0;
           glCtx._jsgDefaultFB = glCtx._jsgGetDefaultFB();
+          // factory so the GL ctx can build a 2D snapshot canvas for drawImage()
+          glCtx._make2DCanvas = (w, h) => wrapCanvas(nativeCreateCanvas(w, h));
           canvas._isWebGL = true;
           canvas._glCtx = glCtx;  // for per-frame default-FBO binding
         }
@@ -58,8 +60,19 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
         ctx = baseGetContext('2d');
         const baseDrawImage = ctx.drawImage.bind(ctx);
         const baseCreatePattern = ctx.createPattern.bind(ctx);
+        const baseGetImageData = ctx.getImageData.bind(ctx);
+        const basePutImageData = ctx.putImageData.bind(ctx);
         ctx.drawImage = (image, ...args) => {
           if (!image) return;
+          // Web compat: drawImage(webglCanvas) blits the GL canvas's pixels onto
+          // a 2D canvas (standard in every browser — used for HUD overlays over a
+          // WebGL scene). napi-canvas can't read GL pixels, so the GL ctx hands us
+          // the flipped RGBA frame; we write it straight into THIS 2D context via
+          // an ImageData so subsequent fillText/fillRect (the HUD) draw on top.
+          if (image._isWebGL && image._glCtx && image._glCtx._snapshotInto) {
+            image._glCtx._snapshotInto(ctx, baseGetImageData, basePutImageData);
+            return;
+          }
           baseDrawImage(image._imgImpl ? image._imgImpl : image, ...args);
         };
         ctx.createPattern = (image, type2) => {

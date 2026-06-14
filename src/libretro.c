@@ -11,6 +11,11 @@
 #include "embedded_runtime.h"
 #include "gl_detect.h"
 
+// gl_blit.c — software-framebuffer -> GL texture -> frontend FBO (for WebGL
+// games that composite their final image onto a 2D display canvas).
+int  jsg_gl_blit_init(void* get_proc, int is_gles);
+void jsg_gl_blit_present(const uint32_t* pixels, int w, int h, unsigned fbo);
+
 #define JSG_VERSION "0.1.0"
 #define DEFAULT_WIDTH 640
 #define DEFAULT_HEIGHT 480
@@ -34,8 +39,12 @@ static bool audio_running = false;
 static struct retro_hw_render_callback hw_render;
 static bool gl_active = false;
 static bool jsg_begun = false;
+static bool gl_is_gles = false;   // negotiated context dialect (for the blit shader)
+static bool gl_blit_ready = false;
 
 static void core_log(enum retro_log_level level, const char* fmt, ...);
+#include <time.h>
+static double now_ms_dbg(void){struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec*1000.0+ts.tv_nsec/1000000.0;}
 static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
 
 static void context_reset(void) {
@@ -44,7 +53,10 @@ static void context_reset(void) {
     // RetroArch's default FBO can change per frame — give the GL binding the
     // live getter so bindFramebuffer(null) always targets the CURRENT FBO.
     jsg_gl_set_fb_getter((void*)hw_render.get_current_framebuffer);
-    core_log(RETRO_LOG_INFO, "GL context ready");
+    // Init the software->GL blit (used when a WebGL game composites onto a 2D
+    // display canvas — HW render is active so we can't software-present directly).
+    gl_blit_ready = jsg_gl_blit_init((void*)hw_render.get_proc_address, gl_is_gles ? 1 : 0);
+    core_log(RETRO_LOG_INFO, "GL context ready (blit %s)", gl_blit_ready ? "ok" : "FAILED");
 }
 static void context_destroy(void) {
     core_log(RETRO_LOG_INFO, "GL context destroyed");
@@ -58,6 +70,15 @@ static void audio_callback(void) {
     size_t frames = jsg_host_audio(&samples);
     // Deliver only real data — injecting silence between chunks IS static.
     if (frames > 0) audio_batch_cb(samples, frames);
+    // DIAGNOSTIC: how often does the frontend pull, and how much each time?
+    static unsigned calls = 0, zero = 0; static double last = 0;
+    calls++; if (frames == 0) zero++;
+    double t = now_ms_dbg();
+    if (t - last > 1000.0) {
+        core_log(RETRO_LOG_INFO, "[audiocb] %u calls/sec, %u empty, last=%zu frames",
+                 calls, zero, frames);
+        calls = 0; zero = 0; last = t;
+    }
 }
 static void audio_set_state(bool enable) { audio_running = enable; }
 static unsigned cur_width = DEFAULT_WIDTH;
@@ -199,9 +220,44 @@ static void poll_pads(void) {
     jsg_host_set_pads(pads);
 }
 
+// Pace retro_run to 60fps. Audio is produced at real wall-clock rate in JS
+// (decoupled from frame count), so this only governs VIDEO cadence — it does
+// NOT affect audio rate. Needed because the software-framebuffer present path
+// isn't throttled by the GL driver's vsync, so retro_run would free-run at
+// thousands of fps. The GL hardware-render path is driver-paced; skip it there.
+static void pace_60fps(void) {
+    static double next = 0.0;
+    const double period = 1000.0 / FPS;
+    double t = now_ms_dbg();
+    if (next == 0.0) { next = t + period; return; }
+    double wait = next - t;
+    // nanosleep overshoots (kernel tick granularity = several ms), so sleeping
+    // the whole 'wait' lands LONG -> ~30fps -> game runs at half speed. Sleep
+    // until ~1.5ms short of target, then busy-trim only that last ~1.5ms. The
+    // per-frame work is ~1ms with huge headroom, so a 1.5ms trim is cheap and
+    // does NOT starve the game (unlike busy-waiting the full 15ms).
+    if (wait > 2.0) {
+        double s = wait - 1.5;
+        struct timespec ts;
+        ts.tv_sec  = (time_t)(s / 1000.0);
+        ts.tv_nsec = (long)((s - ts.tv_sec * 1000.0) * 1000000.0);
+        nanosleep(&ts, NULL);
+    }
+    while (now_ms_dbg() < next) { /* trim final ~1.5ms for 60fps accuracy */ }
+    next += period;
+    t = now_ms_dbg();
+    if (t > next) next = t + period;  // resync after a hitch/pause, no burst
+}
+
 RETRO_API void retro_run(void) {
     input_poll_cb();
     poll_pads();
+
+    // Pace to 60fps for BOTH software AND GL paths. The GL hardware-render
+    // present here is NOT reliably vsync-throttled (observed 6000fps), which
+    // free-runs the game loop and lets object/particle spawns explode -> freeze.
+    // Audio is wall-clock based, so capping the frame rate doesn't affect it.
+    pace_60fps();
 
     // Defer the game entry until GL is actually ready (context_reset fired),
     // or run it immediately for software. Then normal frames.
@@ -221,6 +277,7 @@ RETRO_API void retro_run(void) {
     // offscreen canvas and composite the final image onto a 2D display canvas
     // (with a HUD on top) — then the final pixels live in the software raster,
     // not the GL FBO, so we fall through to the framebuffer path below.
+    // Path A: GL-native game (display canvas IS the GL canvas). Present the FBO.
     if (gl_active && jsg_gl_ready() && jsg_host_display_is_gl()) {
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
         if (!async_audio) {
@@ -234,17 +291,27 @@ RETRO_API void retro_run(void) {
 
     unsigned w = 0, h = 0;
     const uint32_t* fb = jsg_host_framebuffer(&w, &h);
-    if (fb) {
-        if (w != cur_width || h != cur_height) {
-            cur_width = w;
-            cur_height = h;
-            struct retro_game_geometry geom = {
-                .base_width = w, .base_height = h,
-                .max_width = MAX_WIDTH, .max_height = MAX_HEIGHT,
-                .aspect_ratio = (float)w / (float)h,
-            };
-            environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
-        }
+    if (fb && (w != cur_width || h != cur_height)) {
+        cur_width = w; cur_height = h;
+        struct retro_game_geometry geom = {
+            .base_width = w, .base_height = h,
+            .max_width = MAX_WIDTH, .max_height = MAX_HEIGHT,
+            .aspect_ratio = (float)w / (float)h,
+        };
+        environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+    }
+
+    // Path B: HW render is active (a WebGL game) but the DISPLAY is a 2D canvas
+    // (3D composited into 2D + a HUD). RetroArch ignores software video_cb in HW
+    // mode, so upload the software framebuffer as a GL texture and draw it into
+    // the frontend FBO, then signal a valid HW frame.
+    if (gl_active && jsg_gl_ready() && gl_blit_ready && fb) {
+        jsg_gl_blit_present(fb, (int)w, (int)h,
+                            (unsigned)hw_render.get_current_framebuffer());
+        video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
+    }
+    // Path C: pure software (no GL at all). Present the raster directly.
+    else if (fb) {
         video_cb(fb, w, h, w * sizeof(uint32_t));
     } else {
         video_cb(NULL, cur_width, cur_height, cur_width * sizeof(uint32_t));
@@ -318,6 +385,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             hw_render.bottom_left_origin = true;
             if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
                 gl_active = true;
+                gl_is_gles = !tries[i].desktop;   // for the blit shader dialect
                 // Desktop GL needs GLES "#version 300 es" shaders translated to
                 // "#version 330 core"; native GLES3 leaves them untouched.
                 jsg_gl_set_desktop(tries[i].desktop);
@@ -342,10 +410,21 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         core_log(RETRO_LOG_INFO, "using embedded runtime at %s", runtime_dir);
     }
 
-    struct retro_audio_callback audio_cb_desc = { audio_callback, audio_set_state };
-    async_audio = environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK, &audio_cb_desc);
+    // The async audio callback (SET_AUDIO_CALLBACK) busy-spins: the frontend's
+    // audio thread calls it ~23M times/sec, almost always on an empty ring
+    // (audio is only produced 60x/sec by the video loop), which both starves
+    // playback (choppy) and steals CPU (destabilizes video fps). Use the SYNC
+    // path instead — deliver one tick of audio inside retro_run, paced by the
+    // frontend's audio_sync. This is the PLAN's pull model. JSGAME_ASYNC_AUDIO=1
+    // re-enables the old callback path for comparison.
+    if (getenv("JSGAME_ASYNC_AUDIO")) {
+        struct retro_audio_callback audio_cb_desc = { audio_callback, audio_set_state };
+        async_audio = environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK, &audio_cb_desc);
+    } else {
+        async_audio = false;
+    }
     jsg_host_set_audio_backpressure(async_audio);
-    core_log(RETRO_LOG_INFO, "async audio: %s", async_audio ? "yes" : "no (sync fallback)");
+    core_log(RETRO_LOG_INFO, "audio: %s", async_audio ? "async (callback)" : "sync (per-frame)");
 
     jsg_host_set_sram(sram, SRAM_SIZE);
     core_log(RETRO_LOG_INFO, "loading content: %s", game->path);

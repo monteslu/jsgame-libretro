@@ -722,6 +722,30 @@ export class WebGL2RenderingContext {
 
   // ─── Readback ─────────────────────────────────────────────────────────
 
+  // Web-standard ctx2d.drawImage(webglCanvas): write THIS GL frame straight into
+  // the caller's 2D context (the display canvas), so the game's subsequent HUD
+  // draws (fillText/fillRect) land on top of it in the SAME surface. Reads the
+  // live default framebuffer (RGBA, bottom-up), flips, and putImageData. The
+  // raw getImageData/putImageData are passed in (the wrapped ctx overrides them).
+  _snapshotInto(targetCtx, baseGetImageData, basePutImageData) {
+    const w = this._width, h = this._height
+    if (!this._snapPix) this._snapPix = new Uint8Array(w * h * 4)
+    const gl = this._gl
+    const fb = this._jsgGetDefaultFB ? this._jsgGetDefaultFB() : 0
+    gl.glBindFramebuffer(GL.FRAMEBUFFER, fb)
+    gl.glReadPixels(0, 0, w, h, GL.RGBA, GL.UNSIGNED_BYTE, this._snapPix)
+    // reuse an ImageData sized to the target
+    if (!this._snapImage || this._snapImage.width !== w || this._snapImage.height !== h) {
+      this._snapImage = targetCtx.createImageData(w, h)
+    }
+    const dst = this._snapImage.data, row = w * 4
+    for (let yy = 0; yy < h; yy++) {
+      const src = (h - 1 - yy) * row            // GL bottom-up -> 2D top-down
+      dst.set(this._snapPix.subarray(src, src + row), yy * row)
+    }
+    basePutImageData(this._snapImage, 0, 0)
+  }
+
   readPixels(x, y, width, height, format, type, pixelsOrOffset, dstOffset) {
     if (pixelsOrOffset == null) return
     if (typeof pixelsOrOffset === 'number') {

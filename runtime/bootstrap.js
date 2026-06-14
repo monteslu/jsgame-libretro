@@ -80,13 +80,34 @@ let audioPrimed = false;
 let tCb = 0, tAudio = 0, tPresent = 0, tMax = 0, slowFrames = 0;
 const { performance: hostPerf } = require('node:perf_hooks');
 
+// Audio must run at real wall-clock rate, like a browser's AudioContext —
+// NOT a fixed 800 frames per video frame. If we always render 800/frame, then
+// audio rate = fps * 800, so a slow/fast/jittery video frame rate makes audio
+// play at the wrong speed with gaps (choppy). Instead, render exactly the
+// number of frames that real elapsed time demands (elapsed_sec * 48000). The
+// frontend's audio buffer + audio_sync absorb the small per-frame variance.
+const SAMPLE_RATE = 48000;
+let audioClockMs = 0;        // wall-clock anchor for audio production
+let audioDebt = 0;           // fractional-frame carry so we never drift
+
 globalThis.__jsg_frame = () => {
   frame++;
   const t0 = hostPerf.now();
   realm.fireFrame(io.getPads());
   const t1 = hostPerf.now();
 
-  const audio = realm.pullAudio(FRAMES_PER_TICK);
+  // How many audio frames does real elapsed time call for this tick?
+  if (audioClockMs === 0) audioClockMs = t1;
+  const elapsedMs = t1 - audioClockMs;
+  audioClockMs = t1;
+  let want = elapsedMs * (SAMPLE_RATE / 1000) + audioDebt;
+  let nFrames = Math.floor(want);
+  audioDebt = want - nFrames;
+  // Clamp: never render a giant burst (first frame / hitch / pause) or zero.
+  if (nFrames < 1) nFrames = 1;
+  if (nFrames > 4096) { nFrames = 4096; audioDebt = 0; }
+
+  const audio = realm.pullAudio(nFrames);
   if (audio) io.pushAudio(audio);
   const t2 = hostPerf.now();
 
