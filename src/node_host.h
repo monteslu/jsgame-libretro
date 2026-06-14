@@ -30,6 +30,13 @@ const uint32_t* jsg_host_framebuffer(unsigned* width, unsigned* height);
 // pure-2D game) presents the correct surface even when a GL context exists.
 bool jsg_host_display_is_gl(void);
 
+// GPU-composite present: the GL texture id holding the composited frame this
+// frame (0 if the display 2D canvas isn't GPU-backed). Consumed-and-cleared.
+unsigned jsg_host_gpu_texture(unsigned* width, unsigned* height);
+// GPU composite: scene (opaque, returned) + HUD (transparent overlay, out-param)
+// texture ids. Consumed-and-cleared per call.
+unsigned jsg_host_gpu_composite(unsigned* hud, unsigned* width, unsigned* height);
+
 // Gamepad snapshot written by the core before each frame; read by the JS shim.
 // One entry per port. buttons: bit i = RETRO_DEVICE_ID_JOYPAD_* pressed.
 // axes: lx, ly, rx, ry in [-32768, 32767]. triggers: l2, r2 in [0, 32767].

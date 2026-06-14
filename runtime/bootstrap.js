@@ -119,7 +119,25 @@ globalThis.__jsg_frame = () => {
   const canvas = realm.displayCanvas;
   const displayIsGL = !!canvas._isWebGL;
   if (io.setDisplayGL) io.setDisplayGL(displayIsGL);
-  if (!displayIsGL) io.present(canvas.data(), canvas.width, canvas.height);
+  if (!displayIsGL) {
+    // GPU-composite path: if the display is a 2D canvas backed by a GPU (Ganesh)
+    // surface (set up in 3D-composite mode), its pixels already live in a GL
+    // texture — flush GPU work and present that texture directly (GPU->GPU, NO
+    // readback). Falls back to the CPU raster present when not GPU-backed.
+    // GPU-composite: scene is its own opaque texture; the HUD is the Skia
+    // surface (transparent + fillText), flushed to its texture. Present blits
+    // the scene then alpha-blends the HUD on top — all GPU->GPU, no readback.
+    let sceneTex = canvas._isGpu2D ? (canvas._sceneTex || 0) : 0;
+    let hudTex = 0;
+    if (canvas._isGpu2D && canvas.jsgGpuFlush) hudTex = canvas.jsgGpuFlush();
+    if (!globalThis.__gpuPresentLogged && canvas._isGpu2D) { globalThis.__gpuPresentLogged = 1; log('[gpu] present scene=' + sceneTex + ' hud=' + hudTex); }
+    if (sceneTex && io.presentGpuComposite) {
+      io.presentGpuComposite(sceneTex, hudTex, canvas.width, canvas.height);
+      canvas._sceneTex = 0;
+    } else {
+      io.present(canvas.data(), canvas.width, canvas.height);
+    }
+  }
   const t3 = hostPerf.now();
 
   tCb += t1 - t0; tAudio += t2 - t1; tPresent += t3 - t2;

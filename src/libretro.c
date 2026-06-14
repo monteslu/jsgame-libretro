@@ -15,6 +15,11 @@
 // games that composite their final image onto a 2D display canvas).
 int  jsg_gl_blit_init(void* get_proc, int is_gles);
 void jsg_gl_blit_present(const uint32_t* pixels, int w, int h, unsigned fbo);
+// GPU-composite path: blit an existing GL texture (Skia GPU surface) into the
+// frontend FBO — pure GPU->GPU, no upload/readback.
+void jsg_gl_blit_texture(unsigned tex_id, int w, int h, unsigned fbo);
+// Blend an overlay (transparent Skia HUD) over the scene in fbo. swap=1 for BGRA.
+void jsg_gl_blit_overlay(unsigned tex_id, int w, int h, unsigned fbo, int swap);
 
 #define JSG_VERSION "0.1.0"
 #define DEFAULT_WIDTH 640
@@ -287,6 +292,38 @@ RETRO_API void retro_run(void) {
             else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
         }
         return;
+    }
+
+    // Path B-GPU: the display 2D canvas is GPU-backed (Ganesh). Its composited
+    // scene+HUD already live in a GL texture — blit THAT into RA's FBO
+    // (GPU->GPU, no readback, no upload). This is the zero-copy 3D path.
+    if (gl_active && jsg_gl_ready() && gl_blit_ready) {
+        unsigned gw = 0, gh = 0, hud = 0;
+        unsigned scene_tex = jsg_host_gpu_composite(&hud, &gw, &gh);
+        if (scene_tex) {
+            if (gw != cur_width || gh != cur_height) {
+                cur_width = gw; cur_height = gh;
+                struct retro_game_geometry geom = {
+                    .base_width = gw, .base_height = gh,
+                    .max_width = MAX_WIDTH, .max_height = MAX_HEIGHT,
+                    .aspect_ratio = (float)gw / (float)gh,
+                };
+                environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+            }
+            unsigned curfb = (unsigned)hw_render.get_current_framebuffer();
+            // Scene: opaque, RGBA (clears the FBO). HUD: transparent Skia overlay
+            // (N32=BGRA), alpha-blended on top with swizzle.
+            jsg_gl_blit_texture(scene_tex, (int)gw, (int)gh, curfb);
+            if (hud) jsg_gl_blit_overlay(hud, (int)gw, (int)gh, curfb, 0);
+            video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
+            if (!async_audio) {
+                const int16_t* gs = NULL;
+                size_t gf = jsg_host_audio(&gs);
+                if (gf > 0) audio_batch_cb(gs, gf);
+                else audio_batch_cb(silence, (size_t)(AUDIO_RATE / FPS));
+            }
+            return;
+        }
     }
 
     unsigned w = 0, h = 0;

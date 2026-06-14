@@ -62,6 +62,15 @@ static unsigned g_fb_cap = 0;  // allocated pixels
 // offscreen, final image drawn onto a 2D display canvas) presents correctly.
 static bool g_display_is_gl = false;
 
+// GPU-composite present: when the display 2D canvas is GPU-backed (Ganesh), JS
+// hands us the GL texture id holding the composited scene+HUD. The core blits
+// THAT texture into RA's FBO (GPU->GPU), bypassing the software framebuffer
+// readback entirely. Reset to 0 each frame that doesn't use it.
+static unsigned g_gpu_tex = 0;
+static unsigned g_gpu_tex_w = 0, g_gpu_tex_h = 0;
+// GPU composite: separate scene (opaque) + HUD (transparent overlay) textures.
+static unsigned g_gpu_scene = 0, g_gpu_hud = 0;
+
 static jsg_pad_t g_pads[4];
 
 // Keyboard event queue (core enqueues from RETRO_KEYBOARD_CALLBACK; drained
@@ -133,6 +142,43 @@ static napi_value io_present(napi_env env, napi_callback_info info) {
   }
   g_fb_w = w;
   g_fb_h = h;
+  return nullptr;
+}
+
+// presentGpuTexture(texId: number, width: number, height: number) — the display
+// 2D canvas is GPU-backed; texId holds the composited frame. The core blits it
+// into RA's FBO (GPU->GPU, no readback).
+static napi_value io_present_gpu_texture(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  if (argc < 3) return nullptr;
+  uint32_t tex = 0, w = 0, h = 0;
+  napi_get_value_uint32(env, argv[0], &tex);
+  napi_get_value_uint32(env, argv[1], &w);
+  napi_get_value_uint32(env, argv[2], &h);
+  g_gpu_tex = tex;
+  g_gpu_tex_w = w;
+  g_gpu_tex_h = h;
+  return nullptr;
+}
+
+// presentGpuComposite(sceneTex, hudTex, w, h) — present the opaque 3D scene
+// texture, then alpha-blend the transparent HUD overlay texture on top.
+static napi_value io_present_gpu_composite(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  if (argc < 4) return nullptr;
+  uint32_t scene = 0, hud = 0, w = 0, h = 0;
+  napi_get_value_uint32(env, argv[0], &scene);
+  napi_get_value_uint32(env, argv[1], &hud);
+  napi_get_value_uint32(env, argv[2], &w);
+  napi_get_value_uint32(env, argv[3], &h);
+  g_gpu_scene = scene;
+  g_gpu_hud = hud;
+  g_gpu_tex_w = w;
+  g_gpu_tex_h = h;
   return nullptr;
 }
 
@@ -250,6 +296,10 @@ static napi_value io_register(napi_env env, napi_value exports) {
   napi_set_named_property(env, exports, "present", fn);
   napi_create_function(env, "setDisplayGL", NAPI_AUTO_LENGTH, io_set_display_gl, nullptr, &fn);
   napi_set_named_property(env, exports, "setDisplayGL", fn);
+  napi_create_function(env, "presentGpuTexture", NAPI_AUTO_LENGTH, io_present_gpu_texture, nullptr, &fn);
+  napi_set_named_property(env, exports, "presentGpuTexture", fn);
+  napi_create_function(env, "presentGpuComposite", NAPI_AUTO_LENGTH, io_present_gpu_composite, nullptr, &fn);
+  napi_set_named_property(env, exports, "presentGpuComposite", fn);
   napi_create_function(env, "log", NAPI_AUTO_LENGTH, io_log, nullptr, &fn);
   napi_set_named_property(env, exports, "log", fn);
   napi_create_function(env, "getPads", NAPI_AUTO_LENGTH, io_get_pads, nullptr, &fn);
@@ -464,6 +514,28 @@ extern "C" const uint32_t* jsg_host_framebuffer(unsigned* width, unsigned* heigh
 }
 
 extern "C" bool jsg_host_display_is_gl(void) { return g_display_is_gl; }
+
+// The GPU texture id holding the composited frame this frame (0 if the display
+// isn't GPU-backed). Consumed-and-cleared so a stale id never re-presents.
+extern "C" unsigned jsg_host_gpu_texture(unsigned* width, unsigned* height) {
+  unsigned t = g_gpu_tex;
+  if (width) *width = g_gpu_tex_w;
+  if (height) *height = g_gpu_tex_h;
+  g_gpu_tex = 0;  // consume
+  return t;
+}
+
+// GPU composite: scene (opaque) + HUD (transparent overlay) texture ids for this
+// frame. Returns the scene id (0 if none); HUD via out-param. Consumed-cleared.
+extern "C" unsigned jsg_host_gpu_composite(unsigned* hud, unsigned* width,
+                                           unsigned* height) {
+  unsigned s = g_gpu_scene;
+  if (hud) *hud = g_gpu_hud;
+  if (width) *width = g_gpu_tex_w;
+  if (height) *height = g_gpu_tex_h;
+  g_gpu_scene = 0; g_gpu_hud = 0;  // consume
+  return s;
+}
 
 extern "C" void jsg_host_key_event(int down, const char* code, const char* key) {
   if (g_keyq_count >= JSG_KEY_QUEUE) return;

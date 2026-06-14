@@ -13,6 +13,10 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
   netPolicy = netPolicy || 'off';  // off | websocket | full
   const { createCanvas: nativeCreateCanvas, Image: NativeImage, loadImage: nativeLoadImage, GlobalFonts } = canvasLib;
 
+  // GPU (Ganesh) state for the 3D-composite path. Populated when a WebGL context
+  // is first created (3D mode). gpuReady gates the GPU-backed display surface.
+  const glState = { gpuInited: false, gpuReady: false, fboColorTexture: null, getDefaultFb: null };
+
   // ── canvas factory (port of jsgamelauncher canvas.js, 2D only) ──────────
   function wrapCanvas(canvas) {
     const baseGetContext = canvas.getContext.bind(canvas);
@@ -49,6 +53,24 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
           glCtx._make2DCanvas = (w, h) => wrapCanvas(nativeCreateCanvas(w, h));
           canvas._isWebGL = true;
           canvas._glCtx = glCtx;  // for per-frame default-FBO binding
+          // GPU-composite path: a WebGL context exists, so we're in 3D mode.
+          // Init the process Ganesh GrContext from the frontend's GL loader so
+          // the DISPLAY 2D canvas can be GPU-backed (drawImage(glCanvas) becomes
+          // a GPU->GPU blit, no readback). Best-effort: null on CPU-only Skia.
+          if (!glState.gpuInited && glb.jsgGetProcAddress && displayCanvas.jsgGpuInit) {
+            glState.gpuInited = true;
+            try {
+              const proc = glb.jsgGetProcAddress();
+              glState.gpuReady = displayCanvas.jsgGpuInit(proc) && displayCanvas.jsgGpuReady();
+              // sceneTexture(srcFbo,w,h): copy the WebGL FBO into a clean texture
+              // we present DIRECTLY (the 3D scene). The HUD is a SEPARATE Skia
+              // surface (transparent + fillText) blended over it at present —
+              // Skia's GPU draws never reach an externally-written texture, so we
+              // keep scene (raw GL) and HUD (Skia) as two textures.
+              glState.sceneTexture = glb.jsgSceneTexture || null;
+              glState.getDefaultFb = glb.jsgDefaultFramebuffer || null;
+            } catch (e) { glState.gpuReady = false; }
+          }
         }
         return glCtx;
       }
@@ -66,12 +88,41 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
           if (!image) return;
           // Web compat: drawImage(webglCanvas) blits the GL canvas's pixels onto
           // a 2D canvas (standard in every browser — used for HUD overlays over a
-          // WebGL scene). napi-canvas can't read GL pixels, so the GL ctx hands us
-          // the flipped RGBA frame; we write it straight into THIS 2D context via
-          // an ImageData so subsequent fillText/fillRect (the HUD) draw on top.
-          if (image._isWebGL && image._glCtx && image._glCtx._snapshotInto) {
-            image._glCtx._snapshotInto(ctx, baseGetImageData, basePutImageData);
-            return;
+          // WebGL scene). Two implementations:
+          //  - GPU (Ganesh): capture the WebGL scene as its OWN texture (present
+          //    directly), and prep the Skia GPU surface as a TRANSPARENT HUD
+          //    overlay — the game's subsequent fillText draws into it, and the
+          //    host blends the HUD over the scene at present. (Skia GPU draws
+          //    never reach an externally-raw-written texture, so scene and HUD
+          //    must be two separate textures — NO readback either way.)
+          //  - CPU fallback: the GL ctx hands us the flipped RGBA frame and we
+          //    putImageData it into this 2D context (the readback path).
+          if (image._isWebGL && image._glCtx) {
+            if (
+              canvas === displayCanvas && glState.gpuReady &&
+              glState.sceneTexture && canvas.jsgUpgradeToGpu
+            ) {
+              if (!canvas._isGpu2D) {
+                canvas._isGpu2D = canvas.jsgUpgradeToGpu();
+                log('[gpu] upgrade_to_gpu=' + canvas._isGpu2D + ' gpuReady=' + glState.gpuReady);
+              }
+              if (canvas._isGpu2D) {
+                const fbo = image._glCtx._jsgGetDefaultFB
+                  ? image._glCtx._jsgGetDefaultFB() : 0;
+                // 1) scene -> its own texture (presented directly, opaque)
+                canvas._sceneTex = glState.sceneTexture(fbo, canvas.width, canvas.height);
+                // 2) clear the Skia HUD surface to transparent + reset GL state
+                //    so the game's following fillText draws form the overlay.
+                canvas.jsgGpuReset();
+                canvas.jsgGpuClearTransparent();
+                if (!canvas._gpuLogged) { canvas._gpuLogged = 1; log('[gpu] sceneTex=' + canvas._sceneTex); }
+                return;
+              }
+            }
+            if (image._glCtx._snapshotInto) {
+              image._glCtx._snapshotInto(ctx, baseGetImageData, basePutImageData);
+              return;
+            }
           }
           baseDrawImage(image._imgImpl ? image._imgImpl : image, ...args);
         };

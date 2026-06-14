@@ -89,6 +89,8 @@ static void   (*p_glClear)(GLbitfield);
 static void   (*p_glClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void   (*p_glDrawArrays)(GLenum, GLint, GLsizei);
 static void   (*p_glBindFramebuffer)(GLenum, GLuint);
+static void   (*p_glBlendFunc)(GLenum, GLenum);
+static void   (*p_glEnable)(GLenum);
 
 static int    g_ready = 0;
 static int    g_is_gles = 0;
@@ -131,6 +133,7 @@ int jsg_gl_blit_init(void* get_proc, int is_gles) {
   LD(glGetProgramiv) LD(glUseProgram) LD(glGetUniformLocation) LD(glGetAttribLocation) LD(glUniform1i)
   LD(glGenBuffers) LD(glBindBuffer) LD(glBufferData) LD(glEnableVertexAttribArray) LD(glVertexAttribPointer)
   LD(glViewport) LD(glDisable) LD(glClear) LD(glClearColor) LD(glDrawArrays) LD(glBindFramebuffer)
+  LD(glBlendFunc) LD(glEnable)
   #undef LD
   // VAO is optional (core profile needs it); load but don't fail if absent
   p_glGenVertexArrays = (void*)L("glGenVertexArrays");
@@ -139,15 +142,18 @@ int jsg_gl_blit_init(void* get_proc, int is_gles) {
   const char* vsrc_gles =
     "#version 300 es\nin vec2 aPos;in vec2 aUV;out vec2 vUV;"
     "void main(){vUV=aUV;gl_Position=vec4(aPos,0.0,1.0);}";
+  // `swap` uniform: 0 = pass through (software FB path, already byte-ordered),
+  // 1 = swizzle R<->B (Skia GPU surface is RGBA; RA's GL present expects BGRA).
   const char* fsrc_gles =
-    "#version 300 es\nprecision mediump float;in vec2 vUV;uniform sampler2D tex;out vec4 o;"
-    "void main(){o=texture(tex,vUV);}";
+    "#version 300 es\nprecision mediump float;in vec2 vUV;uniform sampler2D tex;"
+    "uniform int swap;out vec4 o;"
+    "void main(){vec4 c=texture(tex,vUV);o=(swap==1)?c.bgra:c;}";
   const char* vsrc_core =
     "#version 330 core\nin vec2 aPos;in vec2 aUV;out vec2 vUV;"
     "void main(){vUV=aUV;gl_Position=vec4(aPos,0.0,1.0);}";
   const char* fsrc_core =
-    "#version 330 core\nin vec2 vUV;uniform sampler2D tex;out vec4 o;"
-    "void main(){o=texture(tex,vUV);}";
+    "#version 330 core\nin vec2 vUV;uniform sampler2D tex;uniform int swap;out vec4 o;"
+    "void main(){vec4 c=texture(tex,vUV);o=(swap==1)?c.bgra:c;}";
 
   GLuint vs = compile(GL_VERTEX_SHADER,  is_gles ? vsrc_gles : vsrc_core);
   GLuint fs = compile(GL_FRAGMENT_SHADER, is_gles ? fsrc_gles : fsrc_core);
@@ -204,5 +210,71 @@ void jsg_gl_blit_present(const uint32_t* pixels, int w, int h, unsigned fbo) {
   if (g_aUV  >= 0) { p_glEnableVertexAttribArray(g_aUV);  p_glVertexAttribPointer(g_aUV,  2, GL_FLOAT, GL_FALSE, 4*sizeof(GLfloat), (void*)(2*sizeof(GLfloat))); }
   GLint loc = p_glGetUniformLocation(g_prog, "tex");
   if (loc >= 0) p_glUniform1i(loc, 0);
+  GLint sloc = p_glGetUniformLocation(g_prog, "swap");
+  if (sloc >= 0) p_glUniform1i(sloc, 0);  // software FB pixels already ordered
   p_glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// Draw an EXISTING GL texture fullscreen into `fbo` — a pure GPU->GPU blit, NO
+// pixel upload and NO readback. `swap` toggles R<->B swizzle (Skia's GL surface
+// stores N32=BGRA; RA present + the scene blit are RGBA, so we normalize with
+// swizzle). The V-flipped quad shows top-left-origin textures upright.
+void jsg_gl_blit_texture_swap(unsigned tex_id, int w, int h, unsigned fbo, int swap) {
+  if (!g_ready || !tex_id) return;
+  p_glBindFramebuffer(0x8D40 /*GL_FRAMEBUFFER*/, fbo);
+  p_glViewport(0, 0, w, h);
+  p_glDisable(GL_DEPTH_TEST);
+  p_glDisable(GL_CULL_FACE);
+  p_glDisable(GL_BLEND);
+  p_glClearColor(0, 0, 0, 1); p_glClear(GL_COLOR_BUFFER_BIT);
+
+  p_glActiveTexture(GL_TEXTURE0);
+  p_glBindTexture(GL_TEXTURE_2D, (GLuint)tex_id);
+
+  p_glUseProgram(g_prog);
+  if (g_vao && p_glBindVertexArray) p_glBindVertexArray(g_vao);
+  p_glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+  if (g_aPos >= 0) { p_glEnableVertexAttribArray(g_aPos); p_glVertexAttribPointer(g_aPos, 2, GL_FLOAT, GL_FALSE, 4*sizeof(GLfloat), (void*)0); }
+  if (g_aUV  >= 0) { p_glEnableVertexAttribArray(g_aUV);  p_glVertexAttribPointer(g_aUV,  2, GL_FLOAT, GL_FALSE, 4*sizeof(GLfloat), (void*)(2*sizeof(GLfloat))); }
+  GLint loc = p_glGetUniformLocation(g_prog, "tex");
+  if (loc >= 0) p_glUniform1i(loc, 0);
+  GLint sloc = p_glGetUniformLocation(g_prog, "swap");
+  if (sloc >= 0) p_glUniform1i(sloc, swap ? 1 : 0);
+  p_glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// Present a Skia GPU surface texture into RA's FBO. The scene is blitted in as
+// RGBA (no swizzle); RA's GL present of an RGBA texture is correct as-is.
+void jsg_gl_blit_texture(unsigned tex_id, int w, int h, unsigned fbo) {
+  jsg_gl_blit_texture_swap(tex_id, w, h, fbo, 0);
+}
+
+#define GL_ONE                  1
+#define GL_ONE_MINUS_SRC_ALPHA  0x0303
+
+// Blend an overlay texture (the transparent Skia HUD) OVER whatever is already
+// in `fbo` (the 3D scene) — does NOT clear. Skia surfaces are PREMULTIPLIED
+// alpha, so the correct over-blend is src*1 + dst*(1-srcA). swap toggles R<->B.
+void jsg_gl_blit_overlay(unsigned tex_id, int w, int h, unsigned fbo, int swap) {
+  if (!g_ready || !tex_id) return;
+  if (!p_glBlendFunc) return;  // loaded in init
+  p_glBindFramebuffer(0x8D40 /*GL_FRAMEBUFFER*/, fbo);
+  p_glViewport(0, 0, w, h);
+  p_glDisable(GL_DEPTH_TEST);
+  p_glDisable(GL_CULL_FACE);
+  p_glEnable(GL_BLEND);
+  p_glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  p_glActiveTexture(GL_TEXTURE0);
+  p_glBindTexture(GL_TEXTURE_2D, (GLuint)tex_id);
+  p_glUseProgram(g_prog);
+  if (g_vao && p_glBindVertexArray) p_glBindVertexArray(g_vao);
+  p_glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+  if (g_aPos >= 0) { p_glEnableVertexAttribArray(g_aPos); p_glVertexAttribPointer(g_aPos, 2, GL_FLOAT, GL_FALSE, 4*sizeof(GLfloat), (void*)0); }
+  if (g_aUV  >= 0) { p_glEnableVertexAttribArray(g_aUV);  p_glVertexAttribPointer(g_aUV,  2, GL_FLOAT, GL_FALSE, 4*sizeof(GLfloat), (void*)(2*sizeof(GLfloat))); }
+  GLint loc = p_glGetUniformLocation(g_prog, "tex");
+  if (loc >= 0) p_glUniform1i(loc, 0);
+  GLint sloc = p_glGetUniformLocation(g_prog, "swap");
+  if (sloc >= 0) p_glUniform1i(sloc, swap ? 1 : 0);
+  p_glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  p_glDisable(GL_BLEND);
 }
