@@ -85,7 +85,7 @@ There are THREE present cases. `gl_active` = the game used WebGL anywhere (so
 | Case | display canvas | how it presents |
 |------|----------------|-----------------|
 | A. GL-native | the WebGL canvas (`_isWebGL`) | `video_cb(RETRO_HW_FRAME_BUFFER_VALID)` — present RA's FBO directly |
-| B. GL + 2D composite | a 2D canvas, but `gl_active` | **gl_blit**: upload the 2D framebuffer as a GL texture, draw fullscreen into RA's FBO, then `video_cb(VALID)` |
+| B. GL + 2D composite | a 2D canvas, but `gl_active` (3D scene + 2D HUD) | **GPU composite** (preferred) or **gl_blit** (fallback) — see §9 |
 | C. pure software | a 2D canvas, no GL | `video_cb(software_pixels)` directly |
 
 **THE TRAP (case B):** once `gl_active`, RetroArch is in HW-render mode and
@@ -94,24 +94,34 @@ its scene onto a 2D display canvas (3D + a 2D HUD) gets a BLACK screen — every
 2D draw is silently dropped. Diagnosing this wasted a lot of time; the tell is
 `getImageData` shows your pixels in the canvas, but they never reach the screen.
 
-**Fix = `src/gl_blit.c`** (the PLAN's "wc_gl_blit" doctrine): software FB → GL
-texture → fullscreen quad into RA's FBO. Picks GLSL `300 es` vs `330 core` to
-match the negotiated context. This makes standard web `ctx2d.drawImage(glCanvas)`
-+ 2D HUD work.
+**Case B is the only path that ever needs GPU-backed (Ganesh) Skia.** Cases A
+and C never touch Ganesh — A presents the WebGL FBO straight, C uses the CPU
+raster + software `video_cb`. So GPU-Skia is opt-in PER FRAME, only when a 3D
+game composites onto a 2D HUD. See §9 for the two case-B implementations (GPU
+composite = no readback; gl_blit = the readback fallback).
 
 ---
 
 ## 5. Web compat: `ctx2d.drawImage(webglCanvas)` is supported — keep it that way
 
 A browser lets you `ctx2d.drawImage(aWebGLCanvas, 0, 0)` to composite a WebGL
-canvas onto a 2D one (standard HUD-over-3D pattern). napi-canvas can't read GL
-pixels, so the engine special-cases it: `runtime/realm.js`'s `drawImage` override
-detects `image._isWebGL` and calls the GL context's `_snapshotInto(targetCtx,
-rawGetImageData, rawPutImageData)` (`runtime/vendor/webgl/webgl2-context.mjs`),
-which `glReadPixels` the live default FBO, flips bottom-up→top-down, and
-`putImageData`s straight into the SAME 2D context so subsequent `fillText`/HUD
-draws land on top. **Never route a game around this with `WebGLRenderTarget` +
-manual readback — that's a shortcut; the point is web compatibility.**
+canvas onto a 2D one (standard HUD-over-3D pattern). The engine special-cases it
+in `runtime/realm.js`'s `drawImage` override (detects `image._isWebGL`), with
+TWO implementations chosen automatically:
+
+- **GPU path (preferred, no readback)** — when the Ganesh libcanvas is present
+  and a `GrContext` is live (3D mode). The WebGL scene becomes its own GL texture
+  and the HUD a transparent Skia GPU surface; they're composited GPU-to-GPU at
+  present. See §9. This is what makes the standard web pattern fast.
+- **CPU fallback (readback)** — `_snapshotInto(targetCtx, rawGetImageData,
+  rawPutImageData)` (`runtime/vendor/webgl/webgl2-context.mjs`): `glReadPixels`
+  the live default FBO, flip bottom-up→top-down, `putImageData` into the SAME 2D
+  context so subsequent `fillText`/HUD draws land on top. Used on CPU-only
+  libcanvas or if GPU init fails.
+
+Either way the GAME code is unchanged — it's the standard `drawImage(glCanvas)` +
+`fillText`. **Never route a game around this with `WebGLRenderTarget` + manual
+readback — that's a shortcut; the point is web compatibility.**
 
 ---
 
@@ -159,7 +169,27 @@ frame — always call `get_current_framebuffer()` live, never cache it, or
 
 ## 9. Present: GPU composite (no readback) vs the gl_blit fallback
 
-There are now TWO Case-B (GL + 2D HUD) present paths:
+**WHEN IS GANESH (GPU-Skia) USED? Only in case B (3D scene + 2D HUD), per frame.**
+Not "always." The decision tree:
+- **Pure 2D game (no WebGL):** CPU raster Skia + software `video_cb`. NO Ganesh.
+  This is the common case and it never touches the GPU-Skia path. (CPU raster is
+  also more robust — Ganesh has been flaky for pure-2D, so we deliberately keep
+  2D on CPU.)
+- **GL-native game (display canvas IS the WebGL canvas):** present RA's FBO
+  directly. NO Skia at all.
+- **3D + 2D HUD (`gl_active`, display is a 2D canvas):** THIS is the only case
+  that uses Ganesh — and only the HUD 2D surface is GPU-backed (the 3D scene is
+  raw GL). If the Ganesh libcanvas is present and `GrContext` init succeeds, use
+  the GPU composite; otherwise fall back to gl_blit (readback). The game's
+  `drawImage(glCanvas)` triggers the upgrade lazily (`jsgUpgradeToGpu`).
+
+So: a GPU-backed Skia surface is created ONLY for the display canvas of a 3D-plus-
+HUD game, and only on a Ganesh build. Everything else stays CPU/native. The
+libcanvas IS built with Ganesh enabled on every platform now, but the GPU
+surface is opt-in at runtime (gated on a `GrDirectContext` being supplied) — so
+shipping Ganesh doesn't change the CPU path for 2D games.
+
+There are TWO Case-B (GL + 2D HUD) present paths:
 
 **GPU composite (preferred, zero readback)** — when libcanvas is the Ganesh
 build (Skia `skia_use_gl=true`). The `drawImage(glCanvas)` GPU path splits the
