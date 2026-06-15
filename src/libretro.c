@@ -48,8 +48,19 @@ static bool gl_is_gles = false;   // negotiated context dialect (for the blit sh
 static bool gl_blit_ready = false;
 
 static void core_log(enum retro_log_level level, const char* fmt, ...);
+// Monotonic millisecond clock for frame pacing. CLOCK_MONOTONIC is POSIX-only
+// (absent on MSVC), so use QueryPerformanceCounter on Windows.
+#ifdef _WIN32
+#include <windows.h>
+static double now_ms_dbg(void){
+    static LARGE_INTEGER freq; if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+}
+#else
 #include <time.h>
 static double now_ms_dbg(void){struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec*1000.0+ts.tv_nsec/1000000.0;}
+#endif
 static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
 
 static void context_reset(void) {

@@ -13,11 +13,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #ifdef _WIN32
 #include <windows.h>
+// <strings.h> (strcasecmp/strncasecmp) is POSIX-only; MSVC spells them _stricmp
+// / _strnicmp in <string.h>. Alias so the code below stays portable.
+#define strcasecmp  _stricmp
+#define strncasecmp _strnicmp
 #else
+#include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #endif
