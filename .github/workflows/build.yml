@@ -71,6 +71,14 @@ jobs:
           rm -rf deps/angle_tmp
           echo "ANGLE_DIR=$PWD/deps/angle" >> "$GITHUB_ENV"
 
+      # CMakeLists.txt embeds runtime/ via `find_program(ZIP_EXECUTABLE zip
+      # REQUIRED)`. The windows-2022 image ships 7z but not GNU `zip`, so the
+      # configure step fails ("Could not find ZIP_EXECUTABLE"). Install it.
+      - name: Install zip (Windows)
+        if: matrix.platform == 'windows-x86_64'
+        shell: bash
+        run: choco install zip -y --no-progress
+
       - name: Fetch prebuilt deps (libnode + libcanvas + simde)
         shell: bash
         run: ./scripts/fetch-deps.sh ${{ matrix.platform }}
