@@ -125,10 +125,28 @@ jobs:
         shell: bash
         run: |
           # macOS dlopen/dlsym live in libc — no -ldl there
-          if [ "$RUNNER_OS" = "macOS" ]; then cc -o test/harness test/harness.c;
-          else cc -o test/harness test/harness.c -ldl; fi
-          JSGAME_RUNTIME_DIR=$PWD/runtime ./test/harness \
-            build/${{ matrix.lib }} test-games/s2-demo/s2-demo.jsg 60
+          if [ "$RUNNER_OS" = "macOS" ]; then cc -o test/harness test/harness.c -g;
+          else cc -o test/harness test/harness.c -ldl -g; fi
+          # TEMP DIAGNOSTIC (revert once aarch64 jsg6 segfault is root-caused):
+          # run under gdb on Linux so a crash prints a symbolized backtrace.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y gdb >/dev/null 2>&1 || true
+            # gdb -batch exits 0 even on inferior crash; make it print the exit
+            # status so we can fail explicitly on a non-zero / signal exit.
+            JSGAME_RUNTIME_DIR=$PWD/runtime gdb -batch \
+              -ex 'run' -ex 'echo \n== BACKTRACE ==\n' -ex 'bt full' \
+              -ex 'echo \n== SHLIBS ==\n' -ex 'info sharedlibrary' \
+              -ex 'print $_exitcode' -ex 'print $_exitsignal' \
+              --args ./test/harness build/${{ matrix.lib }} test-games/s2-demo/s2-demo.jsg 60 \
+              | tee /tmp/gdb.out
+            # Fail the step if the inferior took a signal (segfault) or exited != 0.
+            if grep -q '_exitsignal = [0-9]' /tmp/gdb.out; then
+              echo "::error::harness crashed with a signal (see backtrace above)"; exit 1
+            fi
+          else
+            JSGAME_RUNTIME_DIR=$PWD/runtime ./test/harness \
+              build/${{ matrix.lib }} test-games/s2-demo/s2-demo.jsg 60
+          fi
 
       - name: Package
         shell: bash
