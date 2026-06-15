@@ -57,9 +57,16 @@ static double now_ms_dbg(void){
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
     return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
+static void sleep_ms_dbg(double ms){ if (ms > 0.0) Sleep((DWORD)(ms + 0.5)); }
 #else
 #include <time.h>
 static double now_ms_dbg(void){struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec*1000.0+ts.tv_nsec/1000000.0;}
+static void sleep_ms_dbg(double ms){
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(ms / 1000.0);
+    ts.tv_nsec = (long)((ms - ts.tv_sec * 1000.0) * 1000000.0);
+    nanosleep(&ts, NULL);
+}
 #endif
 static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
 
@@ -253,11 +260,7 @@ static void pace_60fps(void) {
     // per-frame work is ~1ms with huge headroom, so a 1.5ms trim is cheap and
     // does NOT starve the game (unlike busy-waiting the full 15ms).
     if (wait > 2.0) {
-        double s = wait - 1.5;
-        struct timespec ts;
-        ts.tv_sec  = (time_t)(s / 1000.0);
-        ts.tv_nsec = (long)((s - ts.tv_sec * 1000.0) * 1000000.0);
-        nanosleep(&ts, NULL);
+        sleep_ms_dbg(wait - 1.5);
     }
     while (now_ms_dbg() < next) { /* trim final ~1.5ms for 60fps accuracy */ }
     next += period;
