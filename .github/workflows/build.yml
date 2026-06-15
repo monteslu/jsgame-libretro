@@ -24,11 +24,15 @@ jobs:
             runner: ubuntu-24.04
             lib: jsgame_libretro.so
             harness: false
-          # macos-x86_64 parked: free-tier macos-13 Intel runners stall for hours.
-          # - platform: macos-x86_64
-          #   runner: macos-13
-          #   lib: jsgame_libretro.dylib
-          #   harness: true
+          # macos-x86_64: the free Intel macos-13 runner is retired/stalls, so
+          # build on the arm64 macos-14 runner and CROSS-compile to x86_64 (the
+          # Build step passes -DCMAKE_OSX_ARCHITECTURES=x86_64; deps are the
+          # x86_64 libcanvas/libnode artifacts). harness:false — can't run an
+          # x86_64 dylib on the arm64 host.
+          - platform: macos-x86_64
+            runner: macos-14
+            lib: jsgame_libretro.dylib
+            harness: false
           - platform: macos-aarch64
             runner: macos-14
             lib: jsgame_libretro.dylib
@@ -89,7 +93,14 @@ jobs:
       - name: Build (host)
         if: matrix.platform != 'android-aarch64'
         shell: bash
-        run: ./scripts/build.sh
+        run: |
+          # macos-x86_64 is a CROSS build on the arm64 macos-14 runner — tell
+          # CMake to emit an x86_64 binary (matches the x86_64 deps fetched above).
+          if [ "${{ matrix.platform }}" = "macos-x86_64" ]; then
+            ./scripts/build.sh -DCMAKE_OSX_ARCHITECTURES=x86_64
+          else
+            ./scripts/build.sh
+          fi
 
       - name: Build (android cross)
         if: matrix.platform == 'android-aarch64'
