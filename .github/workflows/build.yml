@@ -34,7 +34,10 @@ jobs:
             lib: jsgame_libretro.dylib
             harness: true
           - platform: windows-x86_64
-            runner: windows-2022
+            # windows-2025: libnode v26's .lib needs a newer MSVC STL than
+            # windows-2022 ships — else link fails on __std_min_element_8i /
+            # __std_rotate / __std_unique_* (vectorized STL algorithm helpers).
+            runner: windows-2025
             lib: jsgame_libretro.dll
             harness: false
     runs-on: ${{ matrix.runner }}
