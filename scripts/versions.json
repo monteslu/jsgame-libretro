@@ -1,7 +1,7 @@
 {
   "libnode": {
     "repo": "wasmcart/build-libnode",
-    "release": "v26.3.0"
+    "release": "v26.3.0-jsg7"
   },
   "libcanvas": {
     "repo": "monteslu/build-libcanvas",
