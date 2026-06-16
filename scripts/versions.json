@@ -5,7 +5,7 @@
   },
   "libcanvas": {
     "repo": "monteslu/build-libcanvas",
-    "release": "v1.0.0-jsg7"
+    "release": "v1.0.0-jsg8"
   },
   "simde": {
     "repo": "simd-everywhere/simde",
