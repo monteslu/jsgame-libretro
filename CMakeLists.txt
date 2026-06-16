@@ -11,7 +11,7 @@ if(MSVC)
     # and you can't mix /MT and /MD in one link (LNK2038). /MD also pulls the
     # math intrinsics (log1pf/fmax) from the dynamic UCRT that libaom references
     # as __imp_*. Must match libcanvas — so dynamic, not static.
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 endif()
 
 # ─── Dependencies (prebuilt, fetched by scripts/fetch-deps.sh) ───────────
