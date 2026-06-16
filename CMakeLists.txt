@@ -7,7 +7,11 @@ set(CMAKE_C_STANDARD 11)
 
 if(MSVC)
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++20>" "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # Dynamic CRT (/MD): the prebuilt libcanvas.lib is built MD_DynamicRelease,
+    # and you can't mix /MT and /MD in one link (LNK2038). /MD also pulls the
+    # math intrinsics (log1pf/fmax) from the dynamic UCRT that libaom references
+    # as __imp_*. Must match libcanvas — so dynamic, not static.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # ─── Dependencies (prebuilt, fetched by scripts/fetch-deps.sh) ───────────
@@ -125,7 +129,9 @@ if(WIN32)
         winmm dbghelp ws2_32 crypt32 iphlpapi psapi userenv bcrypt
         # Skia GDI fontmgr (ScriptShape) + XPS (CreateFontPackage) + Rust std
         # (Nt* syscalls): Uniscribe, font-subsetting, and ntdll import libs.
-        usp10 fontsub ntdll gdi32 user32 ole32 oleaut32 shell32 advapi32)
+        usp10 fontsub ntdll gdi32 user32 ole32 oleaut32 shell32 advapi32
+        # Skia's GrGLMakeWinInterface needs WGL (wglGetProcAddress/CurrentContext).
+        opengl32)
     # libcanvas.lib + libnode.lib both bundle zlib/harfbuzz objects (dup defs);
     # /FORCE:MULTIPLE is MSVC's --allow-multiple-definition (take first, warn).
     target_link_options(jsgame_libretro PRIVATE
