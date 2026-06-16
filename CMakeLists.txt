@@ -131,7 +131,11 @@ if(WIN32)
         # (Nt* syscalls): Uniscribe, font-subsetting, and ntdll import libs.
         usp10 fontsub ntdll gdi32 user32 ole32 oleaut32 shell32 advapi32
         # Skia's GrGLMakeWinInterface needs WGL (wglGetProcAddress/CurrentContext).
-        opengl32)
+        opengl32
+        # Some libcanvas libaom objects were built /MD and reference the dynamic
+        # UCRT import form of two math fns (__imp_log1pf / __imp_fmax). Under the
+        # /MT bulk those are absent; ucrt.lib supplies the __imp_* math imports.
+        ucrt)
     # libcanvas.lib + libnode.lib both bundle zlib/harfbuzz objects (dup defs);
     # /FORCE:MULTIPLE is MSVC's --allow-multiple-definition (take first, warn).
     # /NODEFAULTLIB:msvcrt: one stray /MD Rust object in libcanvas drags in the
