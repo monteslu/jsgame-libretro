@@ -238,3 +238,47 @@ canvas crate via `build-libcanvas/patches/ganesh-gpu.patch`.
   (`cb`=game+render, `audio`, `present`, `max` ms, `slow(>16ms)` count).
 - **Pixel-diff two screenshots** to tell "frozen" from "animating" — a black
   screen with the game logging 60fps is a PRESENT bug, not a logic hang.
+
+---
+
+## 11. Windows build: per-platform deps + CRT/LTO landmines
+
+Getting the Windows core to link was a STACK of independent issues (2026-06-16).
+The diagnosis cost ~a dozen ~40-min CI cycles because there's no local Windows
+repro — read this before touching the Windows build. Errors peeled off in order
+(thousands → 52 → 4 → 2 → 1 → 0); each layer hid the next.
+
+- **POSIX-isms break MSVC compile.** `CLOCK_MONOTONIC`/`clock_gettime`,
+  `<strings.h>` (`strcasecmp`), `nanosleep`/`struct timespec` are POSIX-only.
+  Guard with `#ifdef _WIN32`: `QueryPerformanceCounter`, `_stricmp`/`_strnicmp`,
+  `Sleep()`. (`src/libretro.c`, `src/gl_detect.c`.)
+- **`find_program(ZIP_EXECUTABLE zip REQUIRED)`** in CMakeLists fails — the
+  windows runner has 7z but not GNU `zip`. CI installs it (`choco install zip`).
+- **Runner must be `windows-2025`, not `windows-2022`.** libnode v26's `.lib`
+  needs a newer MSVC STL; on 2022 the link fails on `__std_min_element_8i` /
+  `__std_rotate` / `__std_unique_*` (vectorized STL helpers).
+- **libnode v26 dropped N-API on Windows (THE big one).** Node 24+ FORCES
+  clang-cl, and `vcbuild release` FORCES Thin-LTO → libnode/napi objects are LLVM
+  BITCODE: MSVC `lib.exe` can't archive them (LNK1136) and MSVC `link.exe` can't
+  resolve symbols from them (LNK2001 napi_*). Fixed in build-libnode (tag
+  v26.3.0-jsg9): DISABLE LTO so clang-cl emits real COFF (strip the `&set ltcg=1`
+  vcbuild adds on `release`), then merge ALL `*.lib` INCLUDING the self-emitted
+  `libnode.lib` (it holds the `node::` internals — Buffer/AsyncResource/
+  MakeCallback/CleanupQueue — that `node_api.obj` references). Full saga in
+  internal memory `build-libnode-windows-napi-lto`.
+- **Consumer link needs the right system libs + CRT (CMakeLists `if(WIN32)`):**
+  - `opengl32` — Skia's `GrGLMakeWinInterface` (wglGetProcAddress/CurrentContext).
+  - `ucrt` — a few libcanvas libaom objects reference the dynamic-UCRT import
+    form `__imp_log1pf` / `__imp_fmax`.
+  - CRT must be **/MT** (`MultiThreadedDLL` is WRONG here): libcanvas is ~4057
+    objects `/MT`. `CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded"` (Release-only;
+    `MultiThreadedDLLDebug` is an INVALID value), plus `/NODEFAULTLIB:msvcrt`.
+- **libcanvas's lone Rust object was `/MD`** (`…-static.o`) → 1 unkillable
+  LNK2038/LNK1319 against the `/MT` bulk (LNK2038 can't be `/FORCE`d away).
+  Fixed at the source in build-libcanvas (tag v1.0.0-jsg8): build the Rust
+  staticlib with `RUSTFLAGS=-C target-feature=+crt-static` on Windows so the
+  whole `.lib` is uniformly `/MT`.
+- **Don't local-build Windows** — you can't here (Linux). All Windows debugging
+  is CI-only; locally you can `nm`/`ar` a downloaded `.lib` (COFF archives read
+  fine on Linux: `nm libnode.lib | grep 'T napi_create_function'`, ~145 defs =
+  good) and edit the YAML/CMake, but the build/link loop is GitHub Actions.
