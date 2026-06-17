@@ -13,6 +13,18 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
   netPolicy = netPolicy || 'off';  // off | websocket | full
   const { createCanvas: nativeCreateCanvas, Image: NativeImage, loadImage: nativeLoadImage, GlobalFonts } = canvasLib;
 
+  // SECURITY MODEL: the game realm is a BROWSER sandbox — no process, no fs, no
+  // require, no Node anything. Games are browser games; they need exactly what a
+  // browser gives (window/document/canvas/fetch/WebAssembly/Worker/SharedArray-
+  // Buffer/Atomics) and nothing more. Emscripten-compiled wasm (e.g. box2d3
+  // deluxe) takes its BROWSER code path here (it sees `window` + a real module
+  // `Worker`, and NO `process`, so ENVIRONMENT_IS_NODE is false), including for
+  // threading — pthreads use `new Worker(moduleUrl, {type:'module'})` +
+  // SharedArrayBuffer, served by GameWorker (above). The worker_threads plumbing
+  // lives entirely inside GameWorker / worker-module-bootstrap.mjs, never exposed
+  // to game or wasm code. So an adversarial game cannot reach fs/process/shell at
+  // all — same as a browser tab.
+
   // GPU (Ganesh) state for the 3D-composite path. Populated when a WebGL context
   // is first created (3D mode). gpuReady gates the GPU-backed display surface.
   const glState = { gpuInited: false, gpuReady: false, fboColorTexture: null, getDefaultFb: null };
@@ -404,23 +416,55 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
   }
   GameWebSocket.CONNECTING = 0; GameWebSocket.OPEN = 1; GameWebSocket.CLOSING = 2; GameWebSocket.CLOSED = 3;
 
-  // ── Worker shim (worker_threads + our worker-bootstrap) ────────────────
-  const { Worker: NodeWorker } = require('node:worker_threads');
-  const path = require('node:path');
+  // ── Worker: a real browser-style module Worker ─────────────────────────
+  // `new Worker(url, { type:'module' })`. Used both by game-authored workers AND
+  // by emscripten wasm pthreads (box2d3 deluxe). The game sees only the Web
+  // Worker API; under the hood we run a worker_threads worker whose bootstrap
+  // presents a BROWSER global surface (self/postMessage/SharedArrayBuffer/…, NO
+  // process/fs) so the emscripten module takes its browser worker code path. No
+  // Node surface leaks to game/wasm code — same sandbox as a real browser.
+  const NodeWorker = require('node:worker_threads').Worker;
+  const wPath = require('node:path');
+  const wUrl = require('node:url');
+  // Resolve a Worker scriptUrl (URL object, 'file://…', 'jsg:///rel', 'blob:…',
+  // or a relative './x.mjs') to a real on-disk module file the worker can import.
+  function resolveWorkerModule(scriptUrl) {
+    let s = String(scriptUrl && scriptUrl.href ? scriptUrl.href : scriptUrl);
+    if (s.startsWith('file://')) return wUrl.fileURLToPath(s);
+    let rel;
+    if (s.startsWith('jsg:///')) rel = s.slice('jsg:///'.length);
+    else rel = s.replace(/^\.?\//, '');
+    if (content.root) return wPath.join(content.root, rel);
+    // No on-disk root → can't run a module worker (extraction is required).
+    throw new Error('Worker module needs an on-disk game root: ' + s);
+  }
   class GameWorker {
-    constructor(scriptUrl) {
-      this._listeners = { message: [], error: [] };
-      // Resolve the worker script to a real path inside the game (dir mode) or
-      // extract from zip to a temp; for now support dir-mode relative scripts.
-      const rel = String(scriptUrl).replace(/^\.?\//, '');
-      this._worker = new NodeWorker(path.join(runtimeDir, 'worker-bootstrap.js'), {
-        workerData: { script: rel, gameRoot: content.root || null, isZip: !!content.isZip },
+    constructor(scriptUrl, options) {
+      this._listeners = { message: [], error: [], messageerror: [] };
+      let moduleUrl;
+      try {
+        moduleUrl = wUrl.pathToFileURL(resolveWorkerModule(scriptUrl)).href;
+      } catch (e) {
+        logErr('Worker: ' + e.message);
+        setTimeout(() => this._emit('error', { message: e.message }), 0);
+        return;
+      }
+      const name = (options && options.name) || 'worker';
+      // workerData MUST be the string 'em-pthread' — emscripten's Node-worker
+      // path checks `worker_threads.workerData == 'em-pthread'` to set
+      // ENVIRONMENT_IS_PTHREAD. Pass the module URL + name via env instead.
+      this._worker = new NodeWorker(wPath.join(runtimeDir, 'worker-module-bootstrap.mjs'), {
+        workerData: 'em-pthread',
+        env: { ...process.env, JSG_WORKER_MODULE: moduleUrl, JSG_WORKER_NAME: name },
       });
-      this._worker.on('message', (data) => this._emit('message', { data }));
-      this._worker.on('error', (err) => this._emit('error', { message: err.message }));
+      this._worker.on('message', (data) => {
+        if (data && data.cmd === '__jsg_worker_error') { this._emit('error', { message: data.message }); return; }
+        this._emit('message', { data });
+      });
+      this._worker.on('error', (err) => this._emit('error', { message: err.message, error: err }));
     }
-    postMessage(data, transfer) { this._worker.postMessage(data, transfer); }
-    terminate() { this._worker.terminate(); }
+    postMessage(data, transfer) { if (this._worker) this._worker.postMessage(data, transfer); }
+    terminate() { if (this._worker) this._worker.terminate(); }
     addEventListener(t, fn) { (this._listeners[t] = this._listeners[t] || []).push(fn); }
     removeEventListener(t, fn) { if (this._listeners[t]) this._listeners[t] = this._listeners[t].filter((f) => f !== fn); }
     _emit(t, ev) {
@@ -509,6 +553,10 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
       languages: ['en-US'],
       getGamepads,
       maxTouchPoints: 0,
+      // Real core count — emscripten wasm pthread pools and games sizing thread
+      // counts read this (threaded wasm is first-class; see process/require +
+      // worker_threads wiring).
+      hardwareConcurrency: (() => { try { return require('node:os').cpus().length || 4; } catch { return 4; } })(),
     },
     screen: { width, height, availWidth: width, availHeight: height },
     innerWidth: width,
@@ -545,6 +593,10 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
     // pass-through host classes (host realm intrinsics are fine to share for
     // data types; soft-sandbox stance per PLAN §12.2)
     URL, URLSearchParams, TextEncoder, TextDecoder, Blob, Response, Request, Headers,
+    // Standard web event classes (host intrinsics, shared per PLAN §12.2).
+    // Needed by emscripten wasm glue and many libraries.
+    Event, EventTarget, CustomEvent, MessageEvent, ErrorEvent: globalThis.ErrorEvent,
+    AbortController, AbortSignal,
     ImageData: canvasLib.ImageData,
     Path2D: canvasLib.Path2D,
     OffscreenCanvas: class OffscreenCanvas {
@@ -564,6 +616,12 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
     dispatchEvent: () => true,
     requestIdleCallback: (cb) => setTimeout(() => cb({ timeRemaining: () => 10 }), 0),
     cancelIdleCallback: clearTimeout,
+    // NO process / require / fs / __dirname / global. This is a browser sandbox;
+    // emscripten wasm takes its browser path (sees `window` + module `Worker`,
+    // no `process`). Threading is served by GameWorker, not a Node surface.
+    // SharedArrayBuffer/Atomics are how a pthread shares memory with the main
+    // thread (browser-standard, safe).
+    SharedArrayBuffer, Atomics,
   };
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
@@ -601,6 +659,19 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
     }
     return p;
   }
+  // import.meta.url: a real file:// URL when the game is on disk (zip mode now
+  // extracts to content.root). This lets emscripten wasm glue resolve
+  // `new URL('Module.mjs', import.meta.url)` to a real path so its native
+  // worker_threads pthread workers can load the module. Falls back to the
+  // jsg:/// virtual scheme only if there's no on-disk root.
+  const nodeUrl = require('node:url');
+  const nodePath = require('node:path');
+  function metaUrlFor(relPath) {
+    if (content.root) {
+      try { return nodeUrl.pathToFileURL(nodePath.join(content.root, relPath)).href; } catch {}
+    }
+    return 'jsg:///' + relPath;
+  }
   function loadModule(relPath) {
     if (moduleCache.has(relPath)) return moduleCache.get(relPath);
     const src = content.read(relPath);
@@ -608,7 +679,9 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
     const mod = new vm.SourceTextModule(src.toString(), {
       context,
       identifier: 'jsg:///' + relPath,
-      initializeImportMeta(meta) { meta.url = 'jsg:///' + relPath; },
+      // Real file:// import.meta.url when on disk — emscripten resolves its
+      // pthread worker URL `new URL('X.mjs', import.meta.url)` against it.
+      initializeImportMeta(meta) { meta.url = metaUrlFor(relPath); },
       importModuleDynamically: async (spec) => {
         const m = loadModule(resolveSpecifier(spec, relPath));
         await linkAndEvaluate(m);

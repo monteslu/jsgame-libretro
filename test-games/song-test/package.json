@@ -1,8 +1,8 @@
 {
-  "name": "s2-demo",
+  "name": "song-test",
   "version": "1.0.0",
-  "main": "dist/s2-demo.js",
   "type": "module",
+  "main": "dist/song-test.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

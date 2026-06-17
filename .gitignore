@@ -5,6 +5,7 @@ node_modules/
 
 # built game packages (rebuild from source dirs)
 *.jsgame
-test-games/*/three.module.js
+# vite build output for npm+vite test-games (rebuild with `npm run build`)
+test-games/*/dist/
 build-android/
 deps.*/

@@ -337,6 +337,37 @@ static int v8_init() {
   // undefined ("is not a constructor"). kDisableNodeOptionsEnv is NOT set, but
   // NODE_OPTIONS alone proved unreliable for embedders, so this is the source.
   std::vector<std::string> args = {"jsgame", "--experimental-vm-modules"};
+  // V8 Inspector (Chrome DevTools / CDP) — OPT-IN via env, and only works when
+  // libnode was built WITH the inspector (the shipping build is
+  // --without-inspector; the *-debug libnode keeps it). Gated so a normal core
+  // never opens a debug port (which would allow arbitrary code execution):
+  //   JSGAME_INSPECT=1            -> listen on 127.0.0.1:9229
+  //   JSGAME_INSPECT=<port>       -> listen on 127.0.0.1:<port>
+  //   JSGAME_INSPECT=<host:port>  -> listen on that host:port
+  //   JSGAME_INSPECT_BRK=1        -> break before the first line (debug boot)
+  // Connect Chrome at chrome://inspect (or copy the devtools:// URL it logs).
+  {
+    const char* insp = getenv("JSGAME_INSPECT");
+    const char* brk = getenv("JSGAME_INSPECT_BRK");
+    bool want_brk = brk && *brk && std::string(brk) != "0";
+    if ((insp && *insp && std::string(insp) != "0") || want_brk) {
+      std::string target = (insp && *insp && std::string(insp) != "0")
+                               ? std::string(insp)
+                               : std::string("9229");
+      // Bare number -> localhost:<port>; otherwise pass host:port through.
+      if (target.find(':') == std::string::npos &&
+          target.find_first_not_of("0123456789") == std::string::npos) {
+        target = "127.0.0.1:" + target;
+      } else if (target == "1") {
+        target = "127.0.0.1:9229";
+      }
+      std::string flag = (want_brk ? "--inspect-brk=" : "--inspect=") + target;
+      args.push_back(flag);
+      logmsg(1, (std::string("jsgame: V8 inspector enabled (") + flag +
+                 ") — connect Chrome at chrome://inspect")
+                    .c_str());
+    }
+  }
   auto result = node::InitializeOncePerProcess(
       args, {node::ProcessInitializationFlags::kNoInitializeV8,
              node::ProcessInitializationFlags::kNoInitializeNodeV8Platform});

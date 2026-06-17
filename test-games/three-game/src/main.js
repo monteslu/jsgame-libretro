@@ -1,9 +1,26 @@
-// three-game — a playable 3D game on Three.js, running in a libretro core.
-// Steer the glowing ship with the D-pad / left stick (or arrow keys); fly into
-// the spinning gems to score. Pure Three.js WebGL2, no browser.
-import * as THREE from './three.module.js';
+/**
 
-const canvas = document.getElementById('c');
+three-game — a playable 3D game on Three.js, running in a libretro core
+(jsgame-libretro) AND in the browser unchanged.
+
+Steer the glowing ship with the D-pad / left stick (or arrow keys); fly into
+the spinning gems to score. Pure Three.js WebGL2.
+
+Authoring model (matches simple-threejs-game-starter):
+  - `three` is an npm dependency, imported by bare specifier.
+  - Vite bundles it (`npm run build` -> dist/) for distribution; in dev,
+    `npm run dev` serves it from node_modules.
+  - Input is normalized through getInput() in utils.js, so the same code reads
+    a browser gamepad and the libretro RetroPad (jsgame-libretro shims
+    navigator.getGamepads() to a standard-mapped pad — D-pad on buttons 12-15,
+    analog on axes 0-1).
+
+**/
+
+import * as THREE from 'three';
+import { getInput } from './utils.js';
+
+const canvas = document.getElementById('game-canvas');
 const W = canvas.width, H = canvas.height;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -61,31 +78,18 @@ function spawnGem() {
 }
 for (let i = 0; i < 6; i++) spawnGem();
 
-// ── input: gamepad (RetroPad) + arrow keys ─────────────────────────────────
-const keys = Object.create(null);
-window.addEventListener('keydown', (e) => { keys[e.code] = true; });
-window.addEventListener('keyup', (e) => { keys[e.code] = false; });
-
-function readInput() {
+// ── input: normalized RetroPad / gamepad / keyboard via getInput() ──────────
+// Combine the D-pad (buttons) with the left analog stick so the ship responds
+// to a digital RetroPad D-pad AND an analog stick / xbox pad alike.
+function readMove() {
+  const player = getInput()[0]; // gamepad if present, else keyboard
   let x = 0, y = 0;
-  const pads = (navigator.getGamepads && navigator.getGamepads()) || [];
-  const gp = pads[0];
-  if (gp) {
-    // D-pad: standard mapping buttons 12-15 = up/down/left/right
-    if (gp.buttons[12]?.pressed) y -= 1;
-    if (gp.buttons[13]?.pressed) y += 1;
-    if (gp.buttons[14]?.pressed) x -= 1;
-    if (gp.buttons[15]?.pressed) x += 1;
-    // left analog stick
-    if (gp.axes.length >= 2) {
-      if (Math.abs(gp.axes[0]) > 0.2) x += gp.axes[0];
-      if (Math.abs(gp.axes[1]) > 0.2) y += gp.axes[1];
-    }
-  }
-  if (keys.ArrowLeft) x -= 1;
-  if (keys.ArrowRight) x += 1;
-  if (keys.ArrowUp) y -= 1;
-  if (keys.ArrowDown) y += 1;
+  if (player.DPAD_LEFT.pressed) x -= 1;
+  if (player.DPAD_RIGHT.pressed) x += 1;
+  if (player.DPAD_UP.pressed) y -= 1;
+  if (player.DPAD_DOWN.pressed) y += 1;
+  if (Math.abs(player.LEFT_STICK_X) > 0.2) x += player.LEFT_STICK_X;
+  if (Math.abs(player.LEFT_STICK_Y) > 0.2) y += player.LEFT_STICK_Y;
   return { x: Math.max(-1, Math.min(1, x)), y: Math.max(-1, Math.min(1, y)) };
 }
 
@@ -96,7 +100,7 @@ let t = 0;
 
 function update() {
   t += 1 / 60;
-  const { x, y } = readInput();
+  const { x, y } = readMove();
 
   ship.position.x += x * speed;
   ship.position.z += y * speed;
@@ -130,10 +134,34 @@ function update() {
   rim.position.z = Math.sin(t) * 6;
 }
 
+// ── per-frame perf instrument (opt-in) ──────────────────────────────────────
+// Measures wall time of update()+render() — the same quantity the core reports
+// as `timing/600f cb=…ms` — so the browser (DevTools) and the core measure the
+// SAME work apples-to-apples. Enabled in the browser via ?perf in the URL; in
+// the core it's harmless (no location.search) and the core's own timing line is
+// the source of truth there. Logs avg/min/max over each 600-frame window.
+const PERF =
+  typeof location !== 'undefined' && /(?:\?|&)perf\b/.test(location.search || '');
+let perfSum = 0, perfMax = 0, perfMin = Infinity, perfN = 0;
+
 let frame = 0;
 function loop() {
+  const t0 = PERF ? performance.now() : 0;
   update();
   renderer.render(scene, camera);
+  if (PERF) {
+    const dt = performance.now() - t0;
+    perfSum += dt; perfN++;
+    if (dt > perfMax) perfMax = dt;
+    if (dt < perfMin) perfMin = dt;
+    if (perfN === 600) {
+      console.log(
+        `perf/600f: cb(update+render)=${(perfSum / 600).toFixed(3)}ms ` +
+        `min=${perfMin.toFixed(3)}ms max=${perfMax.toFixed(3)}ms`,
+      );
+      perfSum = 0; perfMax = 0; perfMin = Infinity; perfN = 0;
+    }
+  }
   frame++;
   // one-shot self-check for the headless harness
   if (frame === 30) console.log(score >= 0 ? 'THREE OK score=' + score : 'THREE FAIL');

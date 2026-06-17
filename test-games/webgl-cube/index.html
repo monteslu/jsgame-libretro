@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>webgl-cube</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%;
+      display: flex; justify-content: center; align-items: center;
+      background-color: #000; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="640" height="480"></canvas>
+  <script>
+    // Scale to window (letterbox), browser-only fullscreen on click. The core
+    // ignores both — its frontend owns the window.
+    const canvas = document.getElementById('c');
+    function resizeCanvas() {
+      const ar = canvas.width / canvas.height, ww = innerWidth, wh = innerHeight;
+      if (ww / wh > ar) { canvas.style.width = wh * ar + 'px'; canvas.style.height = wh + 'px'; }
+      else { canvas.style.width = ww + 'px'; canvas.style.height = ww / ar + 'px'; }
+    }
+    addEventListener('resize', resizeCanvas); resizeCanvas();
+    canvas.addEventListener('click', () =>
+      document.fullscreenElement ? document.exitFullscreen?.() : canvas.requestFullscreen?.());
+  </script>
+  <script src="./src/main.js" type="module"></script>
+</body>
+</html>

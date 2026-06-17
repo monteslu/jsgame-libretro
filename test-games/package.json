@@ -1,0 +1,1 @@
+{ "name": "jsgame-test-games", "private": true, "type": "module", "devDependencies": { "fflate": "^0.8.3" } }

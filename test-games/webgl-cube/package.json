@@ -2,5 +2,15 @@
   "name": "webgl-cube",
   "version": "1.0.0",
   "type": "module",
-  "main": "main.js"
+  "main": "dist/webgl-cube.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "pack": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "fflate": "^0.8.3",
+    "vite": "^8.0.16"
+  }
 }

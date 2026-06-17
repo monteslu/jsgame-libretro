@@ -2,5 +2,18 @@
   "name": "three-game",
   "version": "1.0.0",
   "type": "module",
-  "main": "main.js"
+  "main": "dist/three-game.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "pack": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "vite": "^8.0.16",
+    "fflate": "^0.8.3"
+  }
 }

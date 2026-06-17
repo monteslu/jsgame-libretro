@@ -5,6 +5,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const crypto = require('node:crypto');
 const fflate = require('./vendor/fflate.js');
 
 /**
@@ -49,7 +51,8 @@ function dirContent(root, name) {
 }
 
 function zipContent(zipPath) {
-  const files = fflate.unzipSync(fs.readFileSync(zipPath));
+  const raw = fs.readFileSync(zipPath);
+  const files = fflate.unzipSync(raw);
   // tolerate a single top-level folder wrapping the game tree
   const names = Object.keys(files).filter((n) => !n.endsWith('/'));
   let prefix = '';
@@ -58,6 +61,51 @@ function zipContent(zipPath) {
     if (names.every((n) => n.startsWith(first))) prefix = first;
   }
   const hasPublic = names.some((n) => n.startsWith(prefix + 'public/'));
+
+  // Extract the game tree to a real temp dir (content-addressed by a hash of the
+  // zip, so re-runs reuse it). A real on-disk root is required for emscripten
+  // wasm pthreads: the module's `new Worker(new URL('X.mjs', import.meta.url))`
+  // and native worker_threads need a real file:// path, not an in-memory blob.
+  // It also lets the realm's module loader resolve from disk. Reads still go
+  // through the in-memory `files` map (fast, no fs round-trip).
+  let root = null;
+  try {
+    const PREFIX = 'jsgame-content-';
+    const hash = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 16);
+    const dir = path.join(os.tmpdir(), PREFIX + hash);
+    const stamp = path.join(dir, '.extracted');
+    if (!fs.existsSync(stamp)) {
+      // Prune old extractions before adding a new one so /tmp (a quota'd tmpfs
+      // on some hosts) doesn't grow unbounded across different games. Keep the
+      // most-recently-used few; drop the rest. Best-effort, never fatal.
+      try {
+        const KEEP = 6;
+        const dirs = fs.readdirSync(os.tmpdir())
+          .filter((n) => n.startsWith(PREFIX))
+          .map((n) => { const p = path.join(os.tmpdir(), n); let mt = 0; try { mt = fs.statSync(p).mtimeMs; } catch {} return { p, mt }; })
+          .sort((a, b) => b.mt - a.mt);
+        for (const { p } of dirs.slice(KEEP)) { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} }
+      } catch {}
+      for (const [name, data] of Object.entries(files)) {
+        if (name.endsWith('/')) continue;
+        const rel = prefix && name.startsWith(prefix) ? name.slice(prefix.length) : name;
+        if (!rel) continue;
+        const dst = path.join(dir, rel);
+        if (!path.resolve(dst).startsWith(path.resolve(dir))) continue; // zip-slip guard
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.writeFileSync(dst, Buffer.from(data.buffer, data.byteOffset, data.byteLength));
+      }
+      fs.writeFileSync(stamp, '');
+    } else {
+      try { fs.utimesSync(dir, new Date(), new Date()); } catch {} // mark as recently used
+    }
+    root = dir;
+  } catch (e) {
+    // Extraction is best-effort: if it fails, fall back to in-memory reads
+    // (non-threaded games still work; threaded wasm needs the disk root).
+    root = null;
+  }
+
   const read = (rel) => {
     const p = normalize(rel);
     if (p === null) return null;
@@ -66,7 +114,7 @@ function zipContent(zipPath) {
   };
   return {
     name: path.basename(zipPath, path.extname(zipPath)),
-    root: null,
+    root,
     isZip: true,
     zipPath,
     read,

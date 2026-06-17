@@ -282,3 +282,128 @@ repro — read this before touching the Windows build. Errors peeled off in orde
   is CI-only; locally you can `nm`/`ar` a downloaded `.lib` (COFF archives read
   fine on Linux: `nm libnode.lib | grep 'T napi_create_function'`, ~145 defs =
   good) and edit the YAML/CMake, but the build/link loop is GitHub Actions.
+
+## 12. Threaded wasm (emscripten pthreads) — make the realm look like Node
+
+Threaded wasm (e.g. box2d3-wasm's "deluxe" build, `b2CreateThreadedWorld` +
+enkiTS) is FIRST-CLASS and works in the core. The hard part was a wrong mental
+model, not the tech: libnode has had `worker_threads` + `SharedArrayBuffer` since
+the S3 spike (`bootstrap.js`), so threading was always *possible* — emscripten
+just couldn't *find* it.
+
+**Why it failed at first (the trap):** emscripten's glue picks Node vs browser via
+`ENVIRONMENT_IS_NODE = typeof process == 'object' && …versions.node`. The realm is
+a soft sandbox that HID `process`/`require` (realm.js header: "No fs, no process,
+no require"). So emscripten took the BROWSER path:
+`new Worker(new URL('Box2D.deluxe.mjs', import.meta.url), {type:'module'})`. That
+can't work here — the old GameWorker shim only sourced game-authored worker files
+from disk (and failed in zip mode: no `gameRoot`), and `import.meta.url` was a
+`jsg://` virtual URL. Result: `no worker source` / silent hang.
+
+**The design: BROWSER path + a real module Worker (NOT the Node path).** Games are
+browser games — they need exactly what a browser gives, nothing more. The first
+working version made the realm look like Node (real process, scoped require with
+fs, etc.) so emscripten took its Node path — but that's the WRONG fork: it hands
+game code fs/process it should never have. The RIGHT fork: keep the realm a
+browser (it already has `window`/`fetch`/`WebAssembly`), give it a real
+`Worker(url, {type:'module'})`, and emscripten takes its BROWSER path — which uses
+`new Worker` + `SharedArrayBuffer` and touches NO fs/process. (emscripten gates
+the env: `ENVIRONMENT_IS_NODE = typeof process == 'object' && …node`; the fs/
+process/worker_threads code is all inside `if (ENVIRONMENT_IS_NODE)`. No `process`
+→ browser path → none of it loads.)
+
+**The fix (all in `runtime/`; libnode unchanged):**
+- **content.js** — zip `.jsgame` EXTRACTS to a temp dir
+  (`os.tmpdir()/jsgame-content-<sha1>`, content-addressed + reused, pruned to ~6
+  MRU) and sets `content.root`. A real on-disk root is REQUIRED so the pthread
+  worker URL `new URL('X.mjs', import.meta.url)` resolves to a real file. Reads
+  still use the in-memory unzip map.
+- **realm.js**:
+  - `initializeImportMeta` → real `file://` URL when `content.root` exists. Makes
+    the worker URL real.
+  - NO `process`/`require`/`fs`/`global`/`__dirname` in the sandbox. Game code
+    sees a browser. (Verified adversarially: `typeof process/require/global/
+    __dirname === 'undefined'`; `require('fs')` AND `import('fs')` both blocked.)
+  - `GameWorker` is a real browser-style module Worker: resolves the scriptUrl
+    (URL object / `file://` / `jsg:///rel` / `./rel`) to a real on-disk module,
+    spawns a `worker_threads.Worker` running `worker-module-bootstrap.mjs`.
+  - `SharedArrayBuffer`/`Atomics` exposed (browser-standard; how a pthread shares
+    memory).
+  - Standard web event classes (Event/EventTarget/CustomEvent/MessageEvent/…) —
+    emscripten + many libs reference them.
+- **worker-module-bootstrap.mjs** — runs the emscripten module in a real
+  worker_threads worker. KEY: it does NOT shim a browser surface (that confused
+  emscripten's detection); in the WORKER, emscripten's own Node-worker path wires
+  `parentPort`<->`onmessage` itself and works natively. The worker MUST be
+  launched with `workerData === 'em-pthread'` (the exact string emscripten checks
+  for `ENVIRONMENT_IS_PTHREAD`); pass the module URL + name via env
+  (`JSG_WORKER_MODULE`/`JSG_WORKER_NAME`) instead. Set `globalThis.name` to the
+  em-pthread name too.
+
+**The split that matters:** the MAIN realm thread is the sandbox (browser, no
+process/fs — that's where game code runs). The WORKER thread is a real Node worker
+running trusted bundled wasm; it can't reach or weaken the main realm. So the
+worker_threads plumbing lives entirely in the runtime, invisible to game code.
+
+**Two non-obvious gotchas that cost time:**
+- The realm's parentPort can deliver emscripten's `load` message BEFORE the
+  module installs `onmessage`. (Only relevant if you DO shim the worker — the
+  final design doesn't, but if you bridge messages, BUFFER early ones and flush on
+  `onmessage` set, like a real browser Worker.)
+- `workerData` being an OBJECT (to pass moduleUrl) breaks emscripten's
+  `workerData == 'em-pthread'` check → it doesn't detect pthread → never installs
+  its handler → main thread waits forever. Pass the string; route data via env.
+
+**Game-side build pattern (per box2d3 game, a `build:jsgame` separate from the
+browser build):** ship the DELUXE `Box2D.deluxe.{mjs,wasm}` as RAW assets in
+`public/` (→ dist root); the `.mjs` MUST stay a real on-disk file (its pthread
+worker URL resolves against it), so mark it `external` and `await import()` it
+from the game root. Use vite `lib` mode so the dynamic import stays root-relative
+(`./Box2D.deluxe.mjs`, NOT `./src/…`). Fetch the wasm root-relative and pass
+`wasmBinary` (the realm doesn't auto-locate wasm). Do NOT go through the package
+ENTRY (`import 'box2d3-wasm'`) — its runtime SIMD-detect dynamic-import is what
+hangs; import the deluxe factory directly.
+
+**Verify it's actually threaded:** look for the game's own
+`"Created threaded world"` / `taskSystem= true`, not just "entry evaluated".
+A single-threaded fallback (`b2CreateWorld`) also evaluates and runs.
+
+**box2d3-wasm version pin:** v5 REMOVED the `e_segment` DebugDrawCommandType enum
+(values shifted; index 5 gone) → a debug-draw doing `e_segment.value` crashes on
+undefined. Games with that debug-draw (simple-box2d3, angry-tirds) pin
+`~3.8.0`; box2d-physics (no debug-draw enum dep) is on v5.
+
+**Don't try-catch the threaded path as a fallback.** emscripten compat (non-pthread)
+build EXPORTS `TaskSystem` but calling it `abort()`s the wasm INSTANCE (dead after
+that) — catching is useless. Detect capability first, or just use deluxe.
+
+**Security: the game realm is a BROWSER sandbox — no process/fs/require, period.**
+The insight: these are browser games; a browser gives them ZERO OS access and they
+run fine, so the realm gives them exactly that. Game code sees NO `process`, NO
+`require`, NO `fs`, NO `global`, NO `__dirname` — by any path (CJS `require` and
+ESM `import('fs')` both fail). It sees only browser globals (window/document/
+canvas/fetch/WebAssembly/Worker/SharedArrayBuffer/Atomics). A hostile game's
+`require('fs').rmSync(...)` fails at `require` itself.
+- Threading still works because emscripten takes its BROWSER path (no process →
+  `ENVIRONMENT_IS_NODE` false) and uses `new Worker(url,{type:'module'})` +
+  SharedArrayBuffer — served by `GameWorker`. The worker_threads plumbing lives
+  entirely in `GameWorker`/`worker-module-bootstrap.mjs`, NEVER exposed to game
+  code. The worker runs in a separate Node worker (trusted bundled wasm); it can't
+  reach the main realm's sandbox.
+- This is a genuine browser-equivalent boundary, not "soft" hardening — the
+  earlier neutered-fs/real-process approach (which DID leak process + a chokepoint
+  require) is GONE. Even an adversarial game cannot reach fs/process/shell.
+- Verify with an adversarial game: `typeof process`/`require`/`global`/`__dirname`
+  must all be `'undefined'`; `require('fs')` must throw; `import('fs')` must
+  reject; `Worker` and `SharedArrayBuffer` must be functions (threads still work).
+- jsgamelauncher (the sibling SDL/Node launcher) HISTORICALLY ran games in the
+  main Node scope (full Node — real fs/process, auto-npm-install). As of its
+  `vm-realm-sandbox` branch it adopts THIS SAME model (a `node:vm` realm), so the
+  sandbox is now portable across both runtimes. See jsgamelauncher's
+  `docs/SECURITY.md` + `docs/PLAN-jsgame-libretro-lessons.md`. (On `main` it's
+  still full-Node until that branch merges.)
+
+**Zip extraction is pruned.** `content.js` extracts each `.jsgame` to
+`os.tmpdir()/jsgame-content-<sha1>` (content-addressed, reused). It prunes to the
+~6 most-recently-used before each new extraction so a quota'd `/tmp` tmpfs doesn't
+grow unbounded across different games.

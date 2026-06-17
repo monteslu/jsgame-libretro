@@ -1,7 +1,7 @@
 // space-blaster — a 3D Three.js space shooter. Fly the ship, blast the
 // invaders. Dynamic lighting, emissive glow, explosion light-flashes.
 // Delta-time movement (frame-rate independent). WebAudio SFX. Gamepad.
-import * as THREE from './three.module.js';
+import * as THREE from 'three';
 
 // ── TWO CANVASES ────────────────────────────────────────────────────────────
 // 1) display canvas 'c' is 2D — it's what the frontend presents. Each frame we

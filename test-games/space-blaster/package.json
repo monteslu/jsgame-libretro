@@ -1,1 +1,19 @@
-{ "name": "space-blaster", "version": "1.0.0", "type": "module", "main": "main.js" }
+{
+  "name": "space-blaster",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/space-blaster.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "pack": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "fflate": "^0.8.3",
+    "vite": "^8.0.16"
+  },
+  "dependencies": {
+    "three": "^0.160.0"
+  }
+}
