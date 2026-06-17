@@ -9,3 +9,8 @@ node_modules/
 test-games/*/dist/
 build-android/
 deps.*/
+
+# Makefile.libretro drops the core in the repo root for the buildbot
+/jsgame_libretro.so
+/jsgame_libretro.dylib
+/jsgame_libretro.dll

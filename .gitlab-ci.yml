@@ -1,0 +1,129 @@
+# DESCRIPTION: GitLab CI/CD for libRetro (NOT FOR GitLab-proper)
+#
+# jsgame-libretro is unusual: it builds with CMake and depends on large PREBUILT
+# binaries (libnode/V8 + libcanvas/Skia) fetched from GitHub releases — it is NOT
+# a from-source C build the buildbot can compile itself. So each job extends a
+# libretro ci-template for the platform's runner/toolchain but OVERRIDES `script`
+# to run our Makefile.libretro wrapper (which fetches the right prebuilt deps and
+# runs CMake). The wrapper drops $CORENAME_libretro.<ext> in the repo root, where
+# the buildbot collects the artifact.
+#
+# Only platforms we publish prebuilt libnode + libcanvas for are wired up:
+#   linux x64/aarch64, macOS x64/arm64, windows x64, android arm64.
+# i686 / iOS / consoles / emscripten / webOS have no prebuilt runtime — omitted.
+#
+# STATUS: experimental. The GitHub Actions build (.github/workflows/build.yml) is
+# the proven recipe this mirrors. What still needs verification ON the libretro
+# buildbot containers: that they have a recent CMake, Node 22, and (linux) the
+# libc++/GLES3 dev headers our build needs — see `before_script` per OS. Discuss
+# with libretro maintainers before relying on this (the prebuilt-deps model is
+# non-standard for the buildbot).
+
+##############################################################################
+################################# BOILERPLATE ################################
+##############################################################################
+
+.core-defs:
+  variables:
+    CORENAME: jsgame
+    MAKEFILE: Makefile.libretro
+    GIT_SUBMODULE_STRATEGY: none
+
+include:
+  # Linux 64-bit
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/linux-x64.yml'
+  # Linux 64-bit (ARM)
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/linux-aarch64.yml'
+  # macOS 64-bit (Intel)
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/osx-x64.yml'
+  # macOS ARM 64-bit
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/osx-arm64.yml'
+  # Windows 64-bit (MSVC, since our deps are MSVC libnode/Skia — NOT mingw)
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/windows-x64-msvc19-msys2.yml'
+  # Android (JNI / NDK) — see the commented job below; not wired up yet because the
+# Makefile wrapper drives a HOST CMake build, while Android needs the NDK
+# cross-compile path (different CMake invocation, our android-aarch64 prebuilt
+# deps). TODO once the desktop CI is proven on the buildbot.
+#  - project: 'libretro-infrastructure/ci-templates'
+#    file: '/android-jni.yml'
+
+stages:
+  - build-shared
+
+##############################################################################
+#################################### STAGES ##################################
+##############################################################################
+
+# Linux x86_64
+libretro-build-linux-x64:
+  extends:
+    - .libretro-linux-x64-make-default
+    - .core-defs
+  variables:
+    JSG_PLATFORM: linux-x86_64
+  before_script:
+    # the buildbot linux container needs our build toolchain + headers
+    - apt-get update && apt-get install -y --no-install-recommends cmake zip curl libc++-dev libc++abi-dev libgles2-mesa-dev libegl1-mesa-dev || true
+    - command -v node || (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs) || true
+  script:
+    - make -f Makefile.libretro JSG_PLATFORM=linux-x86_64
+
+# Linux aarch64
+libretro-build-linux-aarch64:
+  extends:
+    - .libretro-linux-aarch64-make-default
+    - .core-defs
+  variables:
+    JSG_PLATFORM: linux-aarch64
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends cmake zip curl libc++-dev libc++abi-dev libgles2-mesa-dev libegl1-mesa-dev || true
+    - command -v node || (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs) || true
+  script:
+    - make -f Makefile.libretro JSG_PLATFORM=linux-aarch64
+
+# macOS Intel (CROSS from arm64 runner: build.sh passes -DCMAKE_OSX_ARCHITECTURES)
+libretro-build-osx-x64:
+  extends:
+    - .libretro-osx-x64-make-default
+    - .core-defs
+  variables:
+    JSG_PLATFORM: macos-x86_64
+    JSG_CMAKE_ARGS: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
+  script:
+    - make -f Makefile.libretro JSG_PLATFORM=macos-x86_64 JSG_CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64"
+
+# macOS ARM64
+libretro-build-osx-arm64:
+  extends:
+    - .libretro-osx-arm64-make-default
+    - .core-defs
+  variables:
+    JSG_PLATFORM: macos-aarch64
+  script:
+    - make -f Makefile.libretro JSG_PLATFORM=macos-aarch64
+
+# Windows x86_64 (MSVC toolchain in msys2 — our libnode/Skia are MSVC builds)
+libretro-build-windows-x64:
+  extends:
+    - .libretro-windows-x64-msvc19-msys2-make-default
+    - .core-defs
+  variables:
+    JSG_PLATFORM: windows-x86_64
+  script:
+    - make -f Makefile.libretro JSG_PLATFORM=windows-x86_64
+
+# Android arm64 (NDK cross) — TODO. We DO publish android-aarch64 prebuilt deps,
+# but the Makefile wrapper runs a host CMake build; Android needs the NDK
+# toolchain CMake path (see .github/workflows/build.yml's "Build (android cross)"
+# step). Wire this up after the desktop jobs are validated on the buildbot.
+#android-arm64-v8a:
+#  extends:
+#    - .libretro-android-jni-arm64-v8a
+#    - .core-defs
+#  variables:
+#    JSG_PLATFORM: android-aarch64

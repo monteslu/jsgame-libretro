@@ -1,0 +1,63 @@
+# Makefile.libretro — thin wrapper so the libretro buildbot (GitLab CI templates)
+# can build this core, which actually builds with CMake + large PREBUILT deps
+# (libnode/V8 + libcanvas/Skia, fetched from GitHub releases). The libretro CI
+# templates invoke `make -f Makefile.libretro platform=<X>`; we translate the
+# libretro platform name to our fetch-deps name, pull the prebuilt deps, and run
+# the CMake build, leaving jsgame_libretro.so/.dylib/.dll in the repo root (where
+# the templates collect the artifact).
+#
+# NOTE (honesty): this is NOT a from-source build — the core depends on
+# multi-hundred-MB prebuilt libnode + Skia that the buildbot cannot compile in
+# its normal pipeline. The CI run downloads our prebuilt release artifacts. Only
+# platforms we publish those artifacts for are buildable (linux x64/arm64, osx
+# arm64/x64, windows x64, android arm64). Other libretro targets (i686, iOS,
+# consoles, emscripten, webOS) have no prebuilt runtime and are intentionally
+# not wired up.
+
+CORE      := jsgame_libretro
+platform  ?= unix
+
+# Map libretro `platform=` (and common arch hints) to our fetch-deps platform.
+# The CI templates pass platform=unix/osx/win plus an ARCH; we also honor an
+# explicit JSG_PLATFORM override the .gitlab-ci.yml sets per job (most reliable).
+ifeq ($(JSG_PLATFORM),)
+  UNAME_M := $(shell uname -m)
+  ifeq ($(platform),unix)
+    ifeq ($(UNAME_M),aarch64)
+      JSG_PLATFORM := linux-aarch64
+    else
+      JSG_PLATFORM := linux-x86_64
+    endif
+  else ifeq ($(platform),osx)
+    ifeq ($(UNAME_M),arm64)
+      JSG_PLATFORM := macos-aarch64
+    else
+      JSG_PLATFORM := macos-x86_64
+    endif
+  else ifneq (,$(findstring win,$(platform)))
+    JSG_PLATFORM := windows-x86_64
+  else
+    JSG_PLATFORM := linux-x86_64
+  endif
+endif
+
+EXT := so
+ifneq (,$(findstring macos,$(JSG_PLATFORM)))
+  EXT := dylib
+endif
+ifneq (,$(findstring windows,$(JSG_PLATFORM)))
+  EXT := dll
+endif
+
+all:
+	@echo "=== jsgame-libretro: building for $(JSG_PLATFORM) (libretro platform=$(platform)) ==="
+	./scripts/fetch-deps.sh $(JSG_PLATFORM)
+	./scripts/build.sh $(JSG_CMAKE_ARGS)
+	@# the buildbot collects $(CORE).$(EXT) from the repo root
+	cp build/$(CORE).$(EXT) ./$(CORE).$(EXT)
+	@echo "=== built ./$(CORE).$(EXT) ==="
+
+clean:
+	rm -rf build ./$(CORE).so ./$(CORE).dylib ./$(CORE).dll
+
+.PHONY: all clean
