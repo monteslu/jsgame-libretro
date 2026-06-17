@@ -25,6 +25,12 @@ function walk(dir, base = dir, out = {}) {
 export default function jsgame(opts = {}) {
   let outDir = 'dist';
   let root = process.cwd();
+  // Package only when the build SUCCEEDS. `writeBundle` runs after output is
+  // written and ONLY on success; `closeBundle` ALSO runs during teardown after a
+  // FAILED build, where it would zip a stale dist/ from a previous run and
+  // silently emit a broken .jsgame. Gate on writeBundle so a build error never
+  // produces a package.
+  let buildOk = false;
   return {
     name: 'vite-plugin-jsgame',
     apply: 'build',
@@ -32,7 +38,11 @@ export default function jsgame(opts = {}) {
       outDir = cfg.build.outDir;
       root = cfg.root;
     },
+    writeBundle() {
+      buildOk = true;
+    },
     closeBundle() {
+      if (!buildOk) return; // build failed → do not package
       const distDir = join(root, outDir);
       if (!existsSync(distDir)) return;
 

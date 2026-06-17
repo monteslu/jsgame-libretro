@@ -449,13 +449,27 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
         setTimeout(() => this._emit('error', { message: e.message }), 0);
         return;
       }
-      const name = (options && options.name) || 'worker';
-      // workerData MUST be the string 'em-pthread' — emscripten's Node-worker
-      // path checks `worker_threads.workerData == 'em-pthread'` to set
-      // ENVIRONMENT_IS_PTHREAD. Pass the module URL + name via env instead.
+      // Distinguish an emscripten pthread from a plain game worker. Emscripten's
+      // glue creates its workers with `{ workerData:'em-pthread', name:'em-pthread-N' }`
+      // (it sets these itself); a plain `new Worker('./w.js')` does not. Only the
+      // emscripten case wants the em-pthread signalling + parentPort-direct
+      // messaging; a plain worker needs the BROWSER worker surface
+      // (self.onmessage/postMessage) bridged to parentPort. Forcing em-pthread on
+      // a plain worker breaks its messaging (the old bug: worker never replied).
+      const isEmPthread =
+        !!(options && (options.workerData === 'em-pthread' ||
+          (typeof options.name === 'string' && options.name.startsWith('em-pthread'))));
+      const name = (options && options.name) || (isEmPthread ? 'em-pthread' : 'worker');
       this._worker = new NodeWorker(wPath.join(runtimeDir, 'worker-module-bootstrap.mjs'), {
-        workerData: 'em-pthread',
-        env: { ...process.env, JSG_WORKER_MODULE: moduleUrl, JSG_WORKER_NAME: name },
+        // emscripten checks `worker_threads.workerData == 'em-pthread'`; pass it
+        // ONLY for real pthreads. Plain workers get a normal worker.
+        workerData: isEmPthread ? 'em-pthread' : null,
+        env: {
+          ...process.env,
+          JSG_WORKER_MODULE: moduleUrl,
+          JSG_WORKER_NAME: name,
+          JSG_WORKER_KIND: isEmPthread ? 'em-pthread' : 'plain',
+        },
       });
       this._worker.on('message', (data) => {
         if (data && data.cmd === '__jsg_worker_error') { this._emit('error', { message: data.message }); return; }
