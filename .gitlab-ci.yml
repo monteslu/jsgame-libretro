@@ -45,12 +45,10 @@ include:
   # Windows 64-bit (MSVC, since our deps are MSVC libnode/Skia — NOT mingw)
   - project: 'libretro-infrastructure/ci-templates'
     file: '/windows-x64-msvc19-msys2.yml'
-  # Android (JNI / NDK) — see the commented job below; not wired up yet because the
-# Makefile wrapper drives a HOST CMake build, while Android needs the NDK
-# cross-compile path (different CMake invocation, our android-aarch64 prebuilt
-# deps). TODO once the desktop CI is proven on the buildbot.
-#  - project: 'libretro-infrastructure/ci-templates'
-#    file: '/android-jni.yml'
+  # Android (JNI / NDK) — Android RetroArch's Core Downloader is a first-class
+# target. The Makefile wrapper does the NDK cross-build for android-aarch64.
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/android-jni.yml'
 
 stages:
   - build-shared
@@ -117,13 +115,24 @@ libretro-build-windows-x64:
   script:
     - make -f Makefile.libretro JSG_PLATFORM=windows-x86_64
 
-# Android arm64 (NDK cross) — TODO. We DO publish android-aarch64 prebuilt deps,
-# but the Makefile wrapper runs a host CMake build; Android needs the NDK
-# toolchain CMake path (see .github/workflows/build.yml's "Build (android cross)"
-# step). Wire this up after the desktop jobs are validated on the buildbot.
-#android-arm64-v8a:
-#  extends:
-#    - .libretro-android-jni-arm64-v8a
-#    - .core-defs
-#  variables:
-#    JSG_PLATFORM: android-aarch64
+# Android arm64 (NDK cross). The android-jni template normally runs `ndk-build`
+# against a jni/Android.mk and collects ${CORENAME}_libretro_android.so. This
+# core has no Android.mk — it's a CMake build with prebuilt deps — so we OVERRIDE
+# `script` to run the NDK CMake build via the Makefile wrapper, then rename the
+# output to $LIBNAME so the template's `artifacts:` (which it sets) collect it.
+# The template provides $NDK_ROOT in its container image; the Makefile reads it.
+android-arm64-v8a:
+  extends:
+    - .libretro-android-jni-arm64-v8a
+    - .core-defs
+  variables:
+    JSG_PLATFORM: android-aarch64
+  before_script:
+    - command -v cmake || (apt-get update && apt-get install -y --no-install-recommends cmake) || true
+    - command -v node || (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs) || true
+  script:
+    # NDK_ROOT is set by the libretro android build image; the Makefile reads it.
+    - make -f Makefile.libretro JSG_PLATFORM=android-aarch64
+    # template's artifacts collect $LIBNAME = ${CORENAME}_libretro_android.so
+    - mv jsgame_libretro.so "${CORENAME}_libretro_android.so"
+    - if [ "${STRIP_CORE_LIB:-1}" -eq 1 ]; then "$NDK_ROOT"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip "${CORENAME}_libretro_android.so" || true; fi
