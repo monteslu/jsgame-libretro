@@ -168,7 +168,13 @@ elseif(ANDROID)
     target_link_libraries(jsgame_libretro PRIVATE
         -Wl,--whole-archive ${LIBCANVAS_A} -Wl,--no-whole-archive
         -Wl,--start-group ${SKIA_LIBS} ${LIBNODE_DIR}/libnode.a -Wl,--end-group
-        dl m log android cpufeatures)
+        dl m log android cpufeatures
+        # Skia's GL backend (libcanvas) references GLESv3/EGL. On Android these are
+        # SYSTEM libraries (always present on the device, resolved at load like
+        # libc) — NOT bundled sidecars, so the core stays a single self-contained
+        # file. Our WebGL binding does NOT need them (it loads GL via the
+        # frontend's get_proc_address); this link is purely for Skia.
+        GLESv3 EGL)
     target_link_options(jsgame_libretro PRIVATE
         -Wl,--allow-multiple-definition -Wl,--exclude-libs,ALL)
 else()
