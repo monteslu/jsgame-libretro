@@ -63,7 +63,7 @@ a game that runs there is the target for running here unchanged.
 |-----|--------|-------|
 | Canvas 2D | ✅ | Skia (`@napi-rs/canvas`); also `OffscreenCanvas`, `Path2D`, `ImageData` |
 | WebAudio | ✅ | webaudio-node DSP engine compiled native; frame-locked pull sink |
-| Gamepad API | ✅ | every controller is `mapping: "standard"` via RetroPad |
+| Gamepad API | ✅ | reads the RetroPad abstraction, so every controller in RetroArch's autoconfig DB just works; exposed as `mapping: "standard"` |
 | FontFace | ✅ | Skia font registration (works from zip-loaded buffers) |
 | LocalStorage | ✅ | backed by libretro SRAM (frontends persist as `.srm`) |
 | WebAssembly | ✅ | runs in V8, in the game realm and workers |
@@ -74,6 +74,24 @@ a game that runs there is the target for running here unchanged.
 | WebSockets | ✅ | privileged-realm socket + game façade; gated by `network` in the `.jsg` (`off`/`websocket`/`full`) |
 | Peer Connection | ❌ | not supported (matches jsgamelauncher) |
 | Save states / rewind | ⛔ | a V8 heap is not serializable; games persist via LocalStorage/SRAM |
+
+### What the frontend gives you for free
+
+Because RetroArch (not the core) owns input, the core reads only the **RetroPad**
+abstraction (`input_state_cb(RETRO_DEVICE_JOYPAD/ANALOG)`) — it never touches a
+physical device. So your game inherits RetroArch's entire input layer at no cost:
+
+- **The full controller autoconfig database.** Every pad RetroArch supports —
+  hundreds, frontend-maintained across Knulli / Batocera / ROCKNIX — maps to the
+  standard RetroPad and reaches your game with zero work in the core or the game.
+  (Contrast jsgamelauncher, which reads SDL directly and owns its own controller
+  database + fallbacks.)
+- **User remapping in the RetroArch UI**, persisted per-core / per-game, plus
+  port assignment and hotkeys — none of which the game has to implement.
+- On Batocera/Knulli, that autoconfig is itself generated from the system
+  controller setup, so the device's mapping flows through to the game. (Note: it's
+  RetroArch's input layer you inherit at runtime — EmulationStation hands off to
+  RetroArch and steps aside; it does not pipe its config into the running core.)
 
 Beyond jsgamelauncher's surface, the synthetic 60fps `requestAnimationFrame`
 clock means fast-forward speeds the game up and pause freezes it, like any
