@@ -407,3 +407,64 @@ canvas/fetch/WebAssembly/Worker/SharedArrayBuffer/Atomics). A hostile game's
 `os.tmpdir()/jsgame-content-<sha1>` (content-addressed, reused). It prunes to the
 ~6 most-recently-used before each new extraction so a quota'd `/tmp` tmpfs doesn't
 grow unbounded across different games.
+
+## 13. The core links NO GL library — load ALL GL from RetroArch's get_proc_address
+
+**The rule a libretro core lives by: RetroArch is the host. It supplies the GL
+context, input, audio sink, window, save files, and the frame clock. The core
+statically bakes in ONLY what RetroArch does NOT provide — for us: libnode (V8/JS
+runtime), the webaudio C DSP engine, and the Rust canvas + Ganesh/Skia. Anything
+else, including GL, comes FROM the frontend.** A core that links its own GL stack
+is re-implementing the host and will fight the frontend on real hardware.
+
+**The mistake we made (and fixed in v0.5.x):** the WebGL2 binding called ~240 GL
+functions DIRECTLY against `#include <GLES3/gl3.h>`, so the `.so` carried hundreds
+of undefined `gl*` symbols that the linker resolved against a GL library:
+- Linux/Android: the system/NDK `libGLESv2` satisfied them (incidentally OK, but
+  still wrong in principle).
+- macOS/Windows: there is NO system GLES, so the build pulled in **ANGLE** and
+  shipped `libEGL`/`libGLESv2` as **sidecar dylibs** next to the core.
+
+Sidecars break the **one-file-per-core** model the RetroArch Core Downloader
+requires (every core on the buildbot is a single `*_libretro.<ext>`). And it was
+redundant: `context_reset` already receives `hw_render.get_proc_address` — the
+frontend's GL loader — exactly how Flycast renders Dreamcast 3D on a Mac without
+linking any GL lib. We captured that pointer and then ignored it.
+
+**The fix (`src/gl/gl_procs.{h,c}`):** declare a `p_glXxx` function pointer for
+every GL function the binding uses, and `#define glXxx p_glXxx` (after
+`<GLES3/gl3.h>`, so header declarations aren't rewritten). `jsg_gl_set_procs`
+loads them all from `hw_render.get_proc_address`. Existing `glXxx(...)` call sites
+resolve to the loaded pointers with ZERO edits. Result: the core links **no GL
+library on any platform** — single self-contained file everywhere, no ANGLE.
+
+**Verify after any GL change** (the regression guard):
+```
+nm -D build/jsgame_libretro.so | grep -E ' U (gl[A-Z]|egl)'   # must be EMPTY
+ldd build/jsgame_libretro.so | grep -iE 'GLES|EGL'            # must be EMPTY
+```
+Both empty = correct. Any undefined `gl*` = a call site not going through the
+redirect (e.g. a file that includes `<GLES3/gl3.h>` but not `gl_procs.h`).
+
+**Gotchas:**
+- Generate the function list from what the LINKER reports undefined (`nm -D ... U
+  gl*`), not a source grep — a `glGetIntegeri_v`-style name with an underscore
+  trips a naive `gl[A-Z][a-zA-Z0-9]*` regex (it stops at `_`). Use
+  `gl[A-Z][a-zA-Z0-9_]*`.
+- Vendor the GLES3 headers (`src/vendor/gl`, Khronos/MIT) so macOS/Windows compile
+  without ANGLE's headers and every platform builds identically (no system
+  mesa-dev needed).
+- **Android still links `GLESv3 EGL`** — but that is for **Skia/libcanvas's** GL
+  backend, NOT our binding. Those are Android SYSTEM libraries (always present,
+  resolved at load like libc) so the core stays single-file. macOS Skia uses the
+  system `OpenGL.framework` (also system, single-file-safe). The distinction:
+  *system* GL libs that the platform always ships are fine to link (they're not
+  bundled); a *bundled* GL lib (ANGLE sidecar) is not.
+- Removing ANGLE surfaced a latent `build.sh` bug: `"${CMAKE_EXTRA[@]}"` on an
+  empty array errors under macOS bash 3.2 `set -u`. If you reintroduce an
+  optional-args array, guard it or expand it safely.
+
+**The sibling wasmcart-libretro made the exact same mistake** (linked GL directly
+→ ANGLE sidecars; even spun up its own EGL context in the core). It caused real
+Android debugging grief — the core fought the frontend's GLES context instead of
+using it. Same fix applied there. See `wasmcart-libretro/doc/dev_notes.md`.
