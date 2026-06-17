@@ -1,5 +1,6 @@
 #include "gl_bindings.h"
 #include <GLES3/gl3.h>
+#include "gl_procs.h"   // redirects glXxx() -> p_glXxx loaded from RA get_proc_address
 #include <vector>
 #include <string>
 

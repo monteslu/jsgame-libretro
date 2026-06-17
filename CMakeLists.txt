@@ -73,6 +73,7 @@ add_library(jsgame_libretro SHARED
     src/binding_gl.cpp
     src/gl/binding_gl_full.cpp
     src/gl/gl_bindings.cpp
+    src/gl/gl_procs.c
     src/binding_audio.cpp
     src/runtime_unzip.c
     src/gl_detect.c
@@ -201,30 +202,14 @@ else()
     )
 endif()
 
-# ── GLES3/EGL for the WebGL2 binding (gl_bindings.cpp) ───────────────────
-# System on Linux, NDK on Android, ANGLE on macOS/Windows (set -DANGLE_DIR).
-set(ANGLE_DIR "" CACHE PATH "Path to ANGLE (include/ + lib/) for macOS/Windows GLES3")
-if(ANGLE_DIR AND EXISTS "${ANGLE_DIR}/include")
-    target_include_directories(jsgame_libretro PRIVATE ${ANGLE_DIR}/include)
-    if(APPLE)
-        target_link_libraries(jsgame_libretro PRIVATE
-            ${ANGLE_DIR}/lib/libEGL.dylib ${ANGLE_DIR}/lib/libGLESv2.dylib)
-    elseif(WIN32)
-        target_link_libraries(jsgame_libretro PRIVATE
-            ${ANGLE_DIR}/lib/libEGL.lib ${ANGLE_DIR}/lib/libGLESv2.lib)
-    endif()
-elseif(ANDROID)
-    target_link_libraries(jsgame_libretro PRIVATE GLESv3 EGL)
-elseif(NOT WIN32 AND NOT APPLE)
-    find_library(GLESV2_LIB GLESv2)
-    find_library(EGL_LIB EGL)
-    if(GLESV2_LIB)
-        target_link_libraries(jsgame_libretro PRIVATE ${GLESV2_LIB})
-    endif()
-    if(EGL_LIB)
-        target_link_libraries(jsgame_libretro PRIVATE ${EGL_LIB})
-    endif()
-endif()
+# ── GLES3 headers for the WebGL2 binding ─────────────────────────────────
+# The binding links NO GL library. Every GL entry point is loaded at runtime from
+# the libretro frontend's hw_render.get_proc_address (RetroArch owns the GL
+# context, exactly like Flycast/mupen) — see src/gl/gl_procs.{h,c}. So we only
+# need the GLES3 *headers* (types + PFN typedefs), which we vendor (Khronos, MIT)
+# so the build is identical and self-contained on every platform: no system
+# mesa-dev, no ANGLE, no EGL/GLESv2 link, no sidecar dylibs. Single-file core.
+target_include_directories(jsgame_libretro PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/gl)
 
 if(NOT MSVC)
     target_compile_options(jsgame_libretro PRIVATE -Wno-unused-parameter -fvisibility=hidden)

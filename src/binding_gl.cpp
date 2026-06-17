@@ -4,6 +4,7 @@
 // registration to that node-addon-api RegisterFullGL.
 #include <napi.h>
 #include <GLES3/gl3.h>
+#include "gl/gl_procs.h"  // redirects glXxx() -> p_glXxx loaded from RA get_proc_address
 #include <cstdio>
 #include "node_api.h"
 #include "node_host.h"
@@ -32,6 +33,10 @@ static get_cur_fb_fn g_get_cur_fb = nullptr;
 extern "C" void jsg_gl_set_procs(void* get_proc, uintptr_t default_fbo) {
   g_get_proc = get_proc;
   g_default_fbo = default_fbo;
+  // Load every GL entry point from the frontend's get_proc_address. This is what
+  // makes the binding's glXxx() calls resolve to RetroArch's GL context (like
+  // Flycast/mupen) instead of a linked libGLESv2 — so the core links NO GL lib.
+  jsg_gl_procs_load(get_proc);
 }
 extern "C" void jsg_gl_set_fb_getter(void* get_cur_fb) {
   g_get_cur_fb = (get_cur_fb_fn)get_cur_fb;

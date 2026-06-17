@@ -51,32 +51,12 @@ jobs:
       - uses: actions/setup-node@v6
         with: { node-version: 22 }
 
-      - name: Install static libc++ + GLES3 headers (linux)
+      # Static libc++ for the link (NOT GLES: GLES3 headers are vendored in
+      # src/vendor/gl, and the core loads GL at runtime via RetroArch's
+      # get_proc_address — it links no GL lib on any platform). No ANGLE anywhere.
+      - name: Install static libc++ (linux)
         if: startsWith(matrix.platform, 'linux')
-        run: sudo apt-get update && sudo apt-get install -y libc++-dev libc++abi-dev libgles2-mesa-dev libegl1-mesa-dev
-
-      - name: Download ANGLE (macOS)
-        if: startsWith(matrix.platform, 'macos')
-        run: |
-          ARCH=x64; [ "${{ matrix.platform }}" = "macos-aarch64" ] && ARCH=arm64
-          mkdir -p deps/angle/lib
-          curl -sL "https://github.com/kivy/angle-builder/releases/download/chromium-7151_rev1/angle-macos-${ARCH}.tar.gz" | tar xz -C deps/angle
-          find deps/angle -maxdepth 1 -name '*.dylib' -exec mv {} deps/angle/lib/ \;
-          echo "ANGLE_DIR=$PWD/deps/angle" >> "$GITHUB_ENV"
-
-      - name: Download ANGLE (Windows)
-        if: matrix.platform == 'windows-x86_64'
-        shell: bash
-        run: |
-          mkdir -p deps/angle_tmp
-          curl -sL https://github.com/mmozeiko/build-angle/releases/download/2026-03-01/angle-x64-2026-03-01.zip -o angle.zip
-          unzip -q angle.zip -d deps/angle_tmp
-          mkdir -p deps/angle/include deps/angle/lib
-          ADIR=$(ls deps/angle_tmp | head -1)
-          cp -r deps/angle_tmp/$ADIR/include/* deps/angle/include/
-          for f in deps/angle_tmp/$ADIR/lib/*.dll.lib; do cp "$f" "deps/angle/lib/$(basename "$f" .dll.lib).lib"; done
-          rm -rf deps/angle_tmp
-          echo "ANGLE_DIR=$PWD/deps/angle" >> "$GITHUB_ENV"
+        run: sudo apt-get update && sudo apt-get install -y libc++-dev libc++abi-dev
 
       # CMakeLists.txt embeds runtime/ via `find_program(ZIP_EXECUTABLE zip
       # REQUIRED)`. The windows-2022 image ships 7z but not GNU `zip`, so the
@@ -113,27 +93,6 @@ jobs:
             -DSKIA_LIB_DIR=$PWD/deps/libcanvas/skia
           cmake --build build -j4
 
-      - name: Fix ANGLE dylib paths (macOS)
-        if: startsWith(matrix.platform, 'macos')
-        run: |
-          # ANGLE dylibs have relative install-names (./libEGL.dylib); the core
-          # records those and dlopen can't resolve them. Copy ANGLE next to the
-          # core and rewrite the references to @loader_path.
-          cp deps/angle/lib/*.dylib build/ 2>/dev/null || true
-          CORE=build/${{ matrix.lib }}
-          for dep in $(otool -L "$CORE" | awk '/libEGL|libGLESv2|libfeature_support|libchrome_zlib/ {print $1}'); do
-            base=$(basename "$dep")
-            install_name_tool -change "$dep" "@loader_path/$base" "$CORE" || true
-          done
-          # also fix inter-dylib refs (libGLESv2 -> libEGL etc.)
-          for d in build/libEGL.dylib build/libGLESv2.dylib; do
-            [ -f "$d" ] || continue
-            install_name_tool -id "@loader_path/$(basename "$d")" "$d" || true
-            for dep in $(otool -L "$d" | awk '/^\t\.\// {print $1}'); do
-              install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "$d" || true
-            done
-          done
-
       - name: Headless harness (realm demo, pixel asserts)
         if: matrix.harness
         shell: bash
@@ -149,25 +108,13 @@ jobs:
         run: |
           mkdir -p dist
           strip build/${{ matrix.lib }} 2>/dev/null || true
-          # Bundle ANGLE runtime libs next to the core (macOS/Windows have no
-          # system GLES; the loader needs libGLESv2/libEGL alongside the core).
-          ANGLE_LIBS=""
-          if [ -d deps/angle ]; then
-            cp deps/angle/lib/*.dylib build/ 2>/dev/null || true
-            cp deps/angle/*.dll deps/angle/lib/*.dll build/ 2>/dev/null || true
-            # glob-safe: nullglob so non-matching patterns vanish under set -e
-            shopt -s nullglob
-            for f in build/libGLESv2* build/libEGL* build/*.dll; do
-              ANGLE_LIBS="$ANGLE_LIBS $(basename "$f")"
-            done
-            shopt -u nullglob
-          fi
+          # Single self-contained core + .info — the core links no GL library
+          # (loads GL from RetroArch's get_proc_address), so there are no ANGLE /
+          # GLES sidecars to bundle on any platform.
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a dist/jsgame_libretro-${{ matrix.platform }}.zip ./build/${{ matrix.lib }} ./jsgame_libretro.info
-            for l in $ANGLE_LIBS; do 7z a dist/jsgame_libretro-${{ matrix.platform }}.zip ./build/$l; done
           else
             zip -j dist/jsgame_libretro-${{ matrix.platform }}.zip build/${{ matrix.lib }} jsgame_libretro.info
-            for l in $ANGLE_LIBS; do zip -j dist/jsgame_libretro-${{ matrix.platform }}.zip build/$l; done
           fi
 
       - uses: actions/upload-artifact@v7

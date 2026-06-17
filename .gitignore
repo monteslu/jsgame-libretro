@@ -14,3 +14,7 @@ deps.*/
 /jsgame_libretro.so
 /jsgame_libretro.dylib
 /jsgame_libretro.dll
+
+# compiled test harness binaries
+test/harness
+test/harness-gl

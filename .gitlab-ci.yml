@@ -66,7 +66,7 @@ libretro-build-linux-x64:
     JSG_PLATFORM: linux-x86_64
   before_script:
     # the buildbot linux container needs our build toolchain + headers
-    - apt-get update && apt-get install -y --no-install-recommends cmake zip curl libc++-dev libc++abi-dev libgles2-mesa-dev libegl1-mesa-dev || true
+    - apt-get update && apt-get install -y --no-install-recommends cmake zip curl libc++-dev libc++abi-dev || true
     - command -v node || (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs) || true
   script:
     - make -f Makefile.libretro JSG_PLATFORM=linux-x86_64
@@ -79,7 +79,7 @@ libretro-build-linux-aarch64:
   variables:
     JSG_PLATFORM: linux-aarch64
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends cmake zip curl libc++-dev libc++abi-dev libgles2-mesa-dev libegl1-mesa-dev || true
+    - apt-get update && apt-get install -y --no-install-recommends cmake zip curl libc++-dev libc++abi-dev || true
     - command -v node || (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs) || true
   script:
     - make -f Makefile.libretro JSG_PLATFORM=linux-aarch64
