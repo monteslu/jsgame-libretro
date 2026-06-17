@@ -23,22 +23,28 @@ See `PLAN.md` for the full design.
 
 ## Content
 
-A game is a normal web game folder with a `package.json`. The frontend needs a
-file extension to scan (libretro/EmulationStation match content by extension,
-never by a bare filename or folder), so a tiny marker carries that extension:
+A game is a normal web game **folder**. The core accepts three forms:
 
-| Mode | What the frontend loads |
+| Input | When |
 |---|---|
-| Directory (dev) | a `.jsg` marker file inside the game folder |
-| Zip (distribution) | a `.jsgame` archive of the same folder |
+| the **directory** | dev / direct runs (the folder IS the game) |
+| a **`.jsg` marker** file in the folder | ES-DE / EmulationStation — libretro frontends scan by file extension, so a tiny marker gives them one file per entry |
+| a **`.jsgame`** zip of the folder | distribution |
 
-The `.jsg` marker is just a pointer — an empty file is fine (same idea as
-ScummVM's `.scummvm` hook file). Everything else is derived from the folder:
+Both the `.jsg` marker and `package.json` are **optional**. The `.jsg` is just a
+pointer for ES-DE-style launchers — an empty file is fine (same idea as ScummVM's
+`.scummvm` hook). A bare folder with a `main.js` runs with neither. Everything is
+derived from the folder:
 
 - **Entry**: `package.json` `main`, then `main.js`, `src/main.js`, `index.js`,
-  `src/index.js`, `game.js`, `src/game.js`. Bundle your game — bare specifiers
-  are not resolved. Static assets in `public/` are addressed from the root,
-  vite-style.
+  `src/index.js`, `game.js`, `src/game.js`. Bundle your game for the core —
+  unlike the browser/jsgamelauncher, the core ships no `node_modules`, so bare
+  specifiers aren't resolved on-device (dev with vite in the browser, then
+  `npm run build`, then run the built `dist/`). Static assets in `public/` are
+  addressed from the root, vite-style.
+- **Security**: games run in a `node:vm` **browser sandbox** — no `process`,
+  `require`, or `fs` reachable by game code (a game can't read your files or run
+  shell commands). Threaded wasm still works.
 - **GPU**: WebGL use is auto-detected by scanning the game's source for a
   `getContext('webgl'|'webgl2')` call (the core must request the GPU context
   before any game code runs, so it can't wait for the call). `JSGAME_GL=1`
