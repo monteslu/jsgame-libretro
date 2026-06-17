@@ -37,10 +37,12 @@ try {
   if (pkg) applyCfg(JSON.parse(pkg.toString()).jsgame);
 } catch { /* no/invalid package.json jsgame block = defaults */ }
 try {
-  // Dir mode: contentPath is the .jsg marker; it may hold override JSON.
-  // Zip mode: contentPath is the .jsgame archive — not JSON, falls to catch.
+  // Marker-file mode: contentPath is the .jsg marker; it may hold override JSON.
+  // Directory mode: contentPath is the dir (config comes from package.json above;
+  // readFileSync of a dir throws → caught). Zip mode: the archive isn't JSON →
+  // caught. So .jsg config is optional and only applies when a marker was passed.
   applyCfg(JSON.parse(require('node:fs').readFileSync(contentPath, 'utf8')));
-} catch { /* empty/non-JSON marker = keep package.json/defaults */ }
+} catch { /* directory / empty marker / archive = keep package.json/defaults */ }
 
 log(`content: ${content.name} (${width}x${height})`);
 

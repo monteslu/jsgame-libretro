@@ -10,13 +10,25 @@ const crypto = require('node:crypto');
 const fflate = require('./vendor/fflate.js');
 
 /**
- * @param {string} contentPath path the frontend loaded (.jsg or .jsgame)
- * @returns {{ name: string, read: (rel: string) => Buffer|null,
- *             exists: (rel: string) => boolean, asset: (rel: string) => Buffer|null }}
+ * Resolve the content the frontend loaded. Accepts THREE forms:
+ *   - a game DIRECTORY (the dir IS the game; package.json/main.js resolved)
+ *   - a .jsg marker FILE inside the game dir (ES-DE/EmulationStation artifact —
+ *     a launcher needs one file per entry; the runtime doesn't require it)
+ *   - a .jsgame/.zip archive (extracted to a temp dir)
+ * package.json and .jsg are both OPTIONAL; entry resolution falls back to
+ * main.js/src/main.js/… (see resolveEntry).
+ * @param {string} contentPath
  */
 function createContent(contentPath) {
   const lc = contentPath.toLowerCase();
   if (lc.endsWith('.jsgame') || lc.endsWith('.zip')) return zipContent(contentPath);
+  // Bare directory → the dir is the game root.
+  try {
+    if (fs.statSync(contentPath).isDirectory()) {
+      return dirContent(contentPath, path.basename(contentPath));
+    }
+  } catch { /* not a stat-able path; fall through to marker-file handling */ }
+  // A file inside the game dir (the .jsg marker, or any file) → its dir.
   return dirContent(path.dirname(contentPath), path.basename(contentPath, '.jsg'));
 }
 
