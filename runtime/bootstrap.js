@@ -28,8 +28,8 @@ let width = 640, height = 480;
 let netPolicy = 'off';  // off | websocket | full (sandbox default; opt in per game)
 function applyCfg(cfg) {
   if (!cfg || typeof cfg !== 'object') return;
-  if (cfg.width > 0 && cfg.width <= 1920) width = cfg.width | 0;
-  if (cfg.height > 0 && cfg.height <= 1080) height = cfg.height | 0;
+  if (cfg.width > 0 && cfg.width <= 3840) width = cfg.width | 0;
+  if (cfg.height > 0 && cfg.height <= 2160) height = cfg.height | 0;
   if (cfg.network) netPolicy = String(cfg.network);
 }
 try {

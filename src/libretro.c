@@ -24,8 +24,8 @@ void jsg_gl_blit_overlay(unsigned tex_id, int w, int h, unsigned fbo, int swap);
 #define JSG_VERSION "0.1.0"
 #define DEFAULT_WIDTH 640
 #define DEFAULT_HEIGHT 480
-#define MAX_WIDTH 1920
-#define MAX_HEIGHT 1080
+#define MAX_WIDTH 3840
+#define MAX_HEIGHT 2160
 #define AUDIO_RATE 48000.0
 #define FPS 60.0
 #define SRAM_SIZE (128 * 1024)
