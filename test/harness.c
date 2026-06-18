@@ -126,7 +126,12 @@ static size_t audio_batch_cb(const int16_t* data, size_t frames) {
 
 static void input_poll_cb(void) {}
 static int16_t input_state_cb(unsigned port, unsigned device, unsigned index, unsigned id) {
-    // Pretend pad 0 holds START + dpad-right, lx = 12345
+    // Pretend pad 0 holds START + dpad-right, lx = 12345.
+    // JSGAME_TEST_HOLD_B=1 holds RetroPad A, which maps to W3C standard gamepad
+    // button 1 (East) — what tuxgame's playTone fires on (btns[1]).
+    if (port == 0 && device == RETRO_DEVICE_JOYPAD && id == RETRO_DEVICE_ID_JOYPAD_A
+        && getenv("JSGAME_TEST_HOLD_B"))
+        return 1;
     if (port == 0 && device == RETRO_DEVICE_JOYPAD &&
         (id == RETRO_DEVICE_ID_JOYPAD_START || id == RETRO_DEVICE_ID_JOYPAD_RIGHT))
         return 1;
