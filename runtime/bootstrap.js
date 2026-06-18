@@ -17,69 +17,80 @@ const canvasLib = require('./vendor/canvas/index.js');
 const { createContent, resolveEntry } = require('./content.js');
 const { buildRealm } = require('./realm.js');
 
-const contentPath = globalThis.__jsg_paths.content;
-const content = createContent(contentPath);
-
-// package.json is the manifest (entry = its "main", resolved in content.js).
-// Sizing/network are OPTIONAL and default sensibly — no config field required.
-// Overrides may live in a "jsgame" block in package.json, or in the .jsg marker
-// (which is otherwise an empty pointer, like ScummVM's .scummvm). Marker wins.
-let width = 640, height = 480;
-let netPolicy = 'off';  // off | websocket | full (sandbox default; opt in per game)
-function applyCfg(cfg) {
-  if (!cfg || typeof cfg !== 'object') return;
-  if (cfg.width > 0 && cfg.width <= 3840) width = cfg.width | 0;
-  if (cfg.height > 0 && cfg.height <= 2160) height = cfg.height | 0;
-  if (cfg.network) netPolicy = String(cfg.network);
-}
-try {
-  const pkg = content.read('package.json');
-  if (pkg) applyCfg(JSON.parse(pkg.toString()).jsgame);
-} catch { /* no/invalid package.json jsgame block = defaults */ }
-try {
-  // Marker-file mode: contentPath is the .jsg marker; it may hold override JSON.
-  // Directory mode: contentPath is the dir (config comes from package.json above;
-  // readFileSync of a dir throws → caught). Zip mode: the archive isn't JSON →
-  // caught. So .jsg config is optional and only applies when a marker was passed.
-  applyCfg(JSON.parse(require('node:fs').readFileSync(contentPath, 'utf8')));
-} catch { /* directory / empty marker / archive = keep package.json/defaults */ }
-
-log(`content: ${content.name} (${width}x${height})`);
-
-const realm = buildRealm({ content, io, canvasLib, width, height, log, logErr, netPolicy, runtimeDir: globalThis.__jsg_paths.runtime });
-
 const FRAMES_PER_TICK = 800; // 48000 / 60
 
-const entry = resolveEntry(content);
-if (!entry) {
-  logErr('no game entry found (package.json main / main.js / src/main.js / ...)');
-} else {
-  log('entry: ' + entry);
-  // __jsg_begin runs the entry — the CORE calls it (from retro_run) once GL is
-  // ready (context_reset has fired), or immediately for software. This avoids
-  // getContext('webgl2') racing ahead of the frontend's async context grant.
-  let begun = false;
-  globalThis.__jsg_begin = () => {
-    if (begun) return; begun = true;
-    Promise.all([
-      import('./vendor/webaudio/LibretroAudioContext.js')
-        .then((m) => { realm.setAudioContextClass(m.LibretroAudioContext); log('webaudio engine ready'); })
-        .catch((e) => logErr('webaudio init failed (stub stays): ' + e.message)),
-      import('./vendor/webgl/webgl2-context.mjs')
-        .then((m) => { realm.setWebGL2Class(m.WebGL2RenderingContext); log('webgl2 ready'); })
-        .catch((e) => logErr('webgl2 init failed: ' + e.message)),
-    ])
-      .then(() => realm.runEntry(entry))
-      .then(
-        () => log('entry evaluated'),
-        (err) => logErr('entry failed: ' + (err && err.stack ? err.stack : String(err)))
-      );
+// ── Game session ──────────────────────────────────────────────────────────
+// One running game = one session (its content + realm + entry + per-game frame
+// counters). reset / load-a-new-game tear down the current session and build a
+// fresh one, so nothing accumulates across restarts (a no-op reset used to leave
+// the old realm + rAF running and only pile on state → the game just got slower).
+let session = null;
+
+function buildSession(contentPath) {
+  const content = createContent(contentPath);
+
+  // package.json is the manifest (entry = its "main"). Sizing/network are OPTIONAL
+  // and default sensibly. Overrides may live in a "jsgame" block in package.json,
+  // or in the .jsg marker (otherwise an empty pointer, like ScummVM's .scummvm).
+  let width = 640, height = 480, netPolicy = 'off';
+  const applyCfg = (cfg) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    if (cfg.width > 0 && cfg.width <= 3840) width = cfg.width | 0;
+    if (cfg.height > 0 && cfg.height <= 2160) height = cfg.height | 0;
+    if (cfg.network) netPolicy = String(cfg.network);
   };
+  try { const pkg = content.read('package.json'); if (pkg) applyCfg(JSON.parse(pkg.toString()).jsgame); }
+  catch { /* no/invalid package.json jsgame block = defaults */ }
+  try { applyCfg(JSON.parse(require('node:fs').readFileSync(contentPath, 'utf8'))); }
+  catch { /* directory / empty marker / archive = keep package.json/defaults */ }
+
+  log(`content: ${content.name} (${width}x${height})`);
+  const realm = buildRealm({ content, io, canvasLib, width, height, log, logErr, netPolicy, runtimeDir: globalThis.__jsg_paths.runtime });
+  const entry = resolveEntry(content);
+  if (!entry) logErr('no game entry found (package.json main / main.js / src/main.js / ...)');
+  else log('entry: ' + entry);
+
+  // per-game frame + audio clock state (reset each session)
+  return { content, realm, entry, begun: false, frame: 0, audioClockMs: 0, audioDebt: 0,
+           tCb: 0, tAudio: 0, tPresent: 0, tMax: 0, slowFrames: 0 };
 }
 
-let frame = 0;
-let audioPrimed = false;
-let tCb = 0, tAudio = 0, tPresent = 0, tMax = 0, slowFrames = 0;
+function startSession(contentPath) {
+  stopSession();
+  session = buildSession(contentPath);
+}
+
+function stopSession() {
+  if (!session) return;
+  try { session.realm.stop(); } catch (e) { logErr('session stop: ' + e.message); }
+  session = null;
+}
+
+// __jsg_begin runs the entry — the CORE calls it (from retro_run) once GL is
+// ready (context_reset has fired), or immediately for software. This avoids
+// getContext('webgl2') racing ahead of the frontend's async context grant.
+globalThis.__jsg_begin = () => {
+  const s = session;
+  if (!s || s.begun || !s.entry) return;
+  s.begun = true;
+  Promise.all([
+    import('./vendor/webaudio/LibretroAudioContext.js')
+      .then((m) => { s.realm.setAudioContextClass(m.LibretroAudioContext); log('webaudio engine ready'); })
+      .catch((e) => logErr('webaudio init failed (stub stays): ' + e.message)),
+    import('./vendor/webgl/webgl2-context.mjs')
+      .then((m) => { s.realm.setWebGL2Class(m.WebGL2RenderingContext); log('webgl2 ready'); })
+      .catch((e) => logErr('webgl2 init failed: ' + e.message)),
+  ])
+    .then(() => { if (session === s) return s.realm.runEntry(s.entry); })
+    .then(
+      () => log('entry evaluated'),
+      (err) => logErr('entry failed: ' + (err && err.stack ? err.stack : String(err)))
+    );
+};
+
+// Build the first session from the initial content path.
+startSession(globalThis.__jsg_paths.content);
+
 const { performance: hostPerf } = require('node:perf_hooks');
 
 // Audio must run at real wall-clock rate, like a browser's AudioContext —
@@ -88,26 +99,28 @@ const { performance: hostPerf } = require('node:perf_hooks');
 // play at the wrong speed with gaps (choppy). Instead, render exactly the
 // number of frames that real elapsed time demands (elapsed_sec * 48000). The
 // frontend's audio buffer + audio_sync absorb the small per-frame variance.
+// (frame counter + audio clock are per-SESSION so a reset starts them fresh.)
 const SAMPLE_RATE = 48000;
-let audioClockMs = 0;        // wall-clock anchor for audio production
-let audioDebt = 0;           // fractional-frame carry so we never drift
 
 globalThis.__jsg_frame = () => {
-  frame++;
+  const s = session;
+  if (!s) return;                 // no game loaded (mid restart) → nothing to do
+  s.frame++;
+  const realm = s.realm;
   const t0 = hostPerf.now();
   realm.fireFrame(io.getPads());
   const t1 = hostPerf.now();
 
   // How many audio frames does real elapsed time call for this tick?
-  if (audioClockMs === 0) audioClockMs = t1;
-  const elapsedMs = t1 - audioClockMs;
-  audioClockMs = t1;
-  let want = elapsedMs * (SAMPLE_RATE / 1000) + audioDebt;
+  if (s.audioClockMs === 0) s.audioClockMs = t1;
+  const elapsedMs = t1 - s.audioClockMs;
+  s.audioClockMs = t1;
+  let want = elapsedMs * (SAMPLE_RATE / 1000) + s.audioDebt;
   let nFrames = Math.floor(want);
-  audioDebt = want - nFrames;
+  s.audioDebt = want - nFrames;
   // Clamp: never render a giant burst (first frame / hitch / pause) or zero.
   if (nFrames < 1) nFrames = 1;
-  if (nFrames > 4096) { nFrames = 4096; audioDebt = 0; }
+  if (nFrames > 4096) { nFrames = 4096; s.audioDebt = 0; }
 
   const audio = realm.pullAudio(nFrames);
   if (audio) io.pushAudio(audio);
@@ -126,9 +139,6 @@ globalThis.__jsg_frame = () => {
     // surface (set up in 3D-composite mode), its pixels already live in a GL
     // texture — flush GPU work and present that texture directly (GPU->GPU, NO
     // readback). Falls back to the CPU raster present when not GPU-backed.
-    // GPU-composite: scene is its own opaque texture; the HUD is the Skia
-    // surface (transparent + fillText), flushed to its texture. Present blits
-    // the scene then alpha-blends the HUD on top — all GPU->GPU, no readback.
     let sceneTex = canvas._isGpu2D ? (canvas._sceneTex || 0) : 0;
     let hudTex = 0;
     if (canvas._isGpu2D && canvas.jsgGpuFlush) hudTex = canvas.jsgGpuFlush();
@@ -142,36 +152,41 @@ globalThis.__jsg_frame = () => {
   }
   const t3 = hostPerf.now();
 
-  tCb += t1 - t0; tAudio += t2 - t1; tPresent += t3 - t2;
+  s.tCb += t1 - t0; s.tAudio += t2 - t1; s.tPresent += t3 - t2;
   const total = t3 - t0;
-  if (total > tMax) tMax = total;
-  if (total > 16) slowFrames++;
-  if (frame % 120 === 0) {
+  if (total > s.tMax) s.tMax = total;
+  if (total > 16) s.slowFrames++;
+  if (s.frame % 120 === 0) {
     const nowMs = Date.now();
     if (!globalThis.__lastWall) globalThis.__lastWall = nowMs - 2000;
     const fps = 120000 / (nowMs - globalThis.__lastWall);
     globalThis.__lastWall = nowMs;
     log(`fps(real): ${fps.toFixed(1)}`);
   }
-  if (frame % 600 === 0) {
-    log(`timing/600f: cb=${(tCb / 600).toFixed(2)}ms audio=${(tAudio / 600).toFixed(2)}ms ` +
-        `present=${(tPresent / 600).toFixed(2)}ms max=${tMax.toFixed(1)}ms slow(>16ms)=${slowFrames}`);
-    tCb = tAudio = tPresent = tMax = 0; slowFrames = 0;
+  if (s.frame % 600 === 0) {
+    log(`timing/600f: cb=${(s.tCb / 600).toFixed(2)}ms audio=${(s.tAudio / 600).toFixed(2)}ms ` +
+        `present=${(s.tPresent / 600).toFixed(2)}ms max=${s.tMax.toFixed(1)}ms slow(>16ms)=${s.slowFrames}`);
+    s.tCb = s.tAudio = s.tPresent = s.tMax = 0; s.slowFrames = 0;
   }
 
-  if (frame === Number(process.env.JSGAME_DUMP_FRAME || 0) && process.env.JSGAME_DUMP_PNG) {
+  if (s.frame === Number(process.env.JSGAME_DUMP_FRAME || 0) && process.env.JSGAME_DUMP_PNG) {
     try {
       require('node:fs').writeFileSync(process.env.JSGAME_DUMP_PNG, canvas.encodeSync('png'));
-      log('dumped frame ' + frame + ' to ' + process.env.JSGAME_DUMP_PNG);
+      log('dumped frame ' + s.frame + ' to ' + process.env.JSGAME_DUMP_PNG);
     } catch (e) {
       logErr('png dump failed: ' + e.message);
     }
   }
 };
 
-globalThis.__jsg_dispatchKey = (type, code, key) => realm.dispatchKey(type, code, key, type === 'keydown');
-globalThis.__jsg_stop = () => log('stop');
-globalThis.__jsg_start = (p) => log('restart: ' + p);
+globalThis.__jsg_dispatchKey = (type, code, key) => { if (session) session.realm.dispatchKey(type, code, key, type === 'keydown'); };
+
+// Restart the realm (reset) or load a different game. The CORE calls __jsg_stop
+// (via jsg_host_stop) then __jsg_start(path) (via jsg_host_start) — together they
+// tear down the current session and build a fresh one. __jsg_begin then re-runs
+// the entry. Passing a NEW path here is how loading a different game works.
+globalThis.__jsg_stop = () => { stopSession(); };
+globalThis.__jsg_start = (p) => { startSession(p || (session && session.content && globalThis.__jsg_paths.content)); };
 
 // S3 spike: worker_threads under the embedded env + linked bindings in workers
 if (process.env.JSGAME_TEST_WORKERS) {

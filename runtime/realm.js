@@ -331,6 +331,8 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
   // constructions before that fall back to the silent stub.
   let RealAudioContextClass = null;
   const liveContexts = [];
+  const activeWorkers = new Set();  // live GameWorker NodeWorkers, for stop()
+  let stopped = false;              // set by stop(); guards the frame loop
   let WebGL2Ctx = null;  // set once the ESM webgl2-context loads
 
   class AudioContext {
@@ -476,9 +478,12 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
         this._emit('message', { data });
       });
       this._worker.on('error', (err) => this._emit('error', { message: err.message, error: err }));
+      // Track so realm.stop() can terminate every worker on a reset / game swap.
+      activeWorkers.add(this._worker);
+      this._worker.on('exit', () => activeWorkers.delete(this._worker));
     }
     postMessage(data, transfer) { if (this._worker) this._worker.postMessage(data, transfer); }
-    terminate() { if (this._worker) this._worker.terminate(); }
+    terminate() { if (this._worker) { const w = this._worker; this._worker = null; activeWorkers.delete(w); w.terminate(); } }
     addEventListener(t, fn) { (this._listeners[t] = this._listeners[t] || []).push(fn); }
     removeEventListener(t, fn) { if (this._listeners[t]) this._listeners[t] = this._listeners[t].filter((f) => f !== fn); }
     _emit(t, ev) {
@@ -716,6 +721,18 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
 
   return {
     displayCanvas,
+    // Tear down this realm so a new one can be built (reset / game swap). Cancels
+    // the pending rAF, terminates every worker, and closes audio contexts. The vm
+    // sandbox + GL textures are dropped with the realm object (GC'd); the V8
+    // isolate itself persists (can't re-init in-process).
+    stop() {
+      if (stopped) return; stopped = true;
+      pendingRaf = null;
+      for (const w of activeWorkers) { try { w.terminate(); } catch {} }
+      activeWorkers.clear();
+      for (const c of liveContexts) { try { c.state = 'closed'; } catch {} }
+      liveContexts.length = 0;
+    },
     setAudioContextClass(cls) { RealAudioContextClass = cls; },
     setWebGL2Class(cls) {
       WebGL2Ctx = cls;
@@ -738,6 +755,7 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
       await linkAndEvaluate(mod);
     },
     fireFrame(int32Pads) {
+      if (stopped) return;
       now += 1000 / 60;
       padSnapshot = int32Pads;
       // Bind the frontend's (live) default framebuffer before the game's frame.

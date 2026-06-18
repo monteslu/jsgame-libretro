@@ -39,6 +39,10 @@ static struct retro_log_callback log_cb_struct;
 static retro_log_printf_t log_cb;
 
 static bool content_loaded = false;
+// Retained across the session so retro_reset() can restart the realm with the
+// same content + runtime. strdup'd in retro_load_game, freed in retro_unload_game.
+static char* loaded_content_path = NULL;
+static char* loaded_runtime_dir = NULL;
 static bool async_audio = false;     // frontend pulls audio on its own thread
 static bool audio_running = false;
 static struct retro_hw_render_callback hw_render;
@@ -219,7 +223,21 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) 
 }
 
 RETRO_API void retro_reset(void) {
-    // TODO: restart game realm
+    if (!content_loaded || !loaded_content_path) return;
+    // Restart the game realm: tear down the running JS runtime, then start it
+    // fresh on the same content. (A no-op reset left the old realm running and
+    // re-fired context_reset on top of it — which only piled on state and made
+    // the game slower, never actually resetting it.)
+    core_log(RETRO_LOG_INFO, "reset: restarting realm");
+    jsg_host_stop();
+    if (jsg_host_start(loaded_content_path, loaded_runtime_dir, host_log) != 0) {
+        core_log(RETRO_LOG_ERROR, "reset: JS runtime failed to restart");
+        content_loaded = false;
+        return;
+    }
+    // Re-arm the deferred entry so retro_run calls jsg_host_begin() again for the
+    // fresh session (it's a one-shot latch otherwise → new realm never runs).
+    jsg_begun = false;
 }
 
 static void poll_pads(void) {
@@ -483,7 +501,14 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         core_log(RETRO_LOG_ERROR, "JS runtime failed to start");
         return false;
     }
+    // Retain content + runtime so retro_reset() can restart cleanly.
+    free(loaded_content_path); loaded_content_path = strdup(game->path);
+    free(loaded_runtime_dir);  loaded_runtime_dir  = runtime_dir ? strdup(runtime_dir) : NULL;
     content_loaded = true;
+    // Re-arm the deferred entry: loading a DIFFERENT game in the same process
+    // builds a fresh session that must run its own entry (jsg_begun is a one-shot
+    // latch; without this, a 2nd game would load but never start).
+    jsg_begun = false;
     return true;
 }
 
@@ -497,6 +522,8 @@ RETRO_API void retro_unload_game(void) {
         jsg_host_stop();
         content_loaded = false;
     }
+    free(loaded_content_path); loaded_content_path = NULL;
+    free(loaded_runtime_dir);  loaded_runtime_dir  = NULL;
 }
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }

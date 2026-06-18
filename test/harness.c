@@ -160,6 +160,7 @@ int main(int argc, char** argv) {
     void (*retro_init)(void);
     bool (*retro_load_game)(const struct retro_game_info*);
     void (*retro_run)(void);
+    void (*retro_reset)(void);
     void (*retro_unload_game)(void);
     void (*retro_deinit)(void);
 
@@ -172,6 +173,7 @@ int main(int argc, char** argv) {
     LOAD(retro_init)
     LOAD(retro_load_game)
     LOAD(retro_run)
+    LOAD(retro_reset)
     LOAD(retro_unload_game)
     LOAD(retro_deinit)
 
@@ -199,9 +201,11 @@ int main(int argc, char** argv) {
     const char* dump = getenv("JSGAME_AUDIO_DUMP");
     if (dump) g_dump = fopen(dump, "wb");
     int pace_us = getenv("JSGAME_PACE_MS") ? atoi(getenv("JSGAME_PACE_MS")) * 1000 : 0;
+    int reset_at = getenv("JSGAME_TEST_RESET") ? atoi(getenv("JSGAME_TEST_RESET")) : -1;
     for (int i = 0; i < frames; i++) {
         if (g_kbcb && i == 5) g_kbcb(true, 97, 'a', 0);   /* press 'a' */
         if (g_kbcb && i == 10) g_kbcb(false, 97, 'a', 0); /* release */
+        if (i == reset_at) { fprintf(stderr, "[harness] retro_reset() at frame %d\n", i); retro_reset(); }
         retro_run();
         if (pace_us) usleep(pace_us);
     }
