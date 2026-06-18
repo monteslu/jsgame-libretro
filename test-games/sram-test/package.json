@@ -1,0 +1,9 @@
+{
+  "name": "sram-test",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "sram-test.js",
+  "scripts": { "dev": "vite", "build": "vite build" },
+  "jsgame": { "width": 640, "height": 480 },
+  "devDependencies": { "vite": "^8.0.0" }
+}
