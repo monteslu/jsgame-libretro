@@ -211,6 +211,19 @@ static napi_value jsg_gl_get_proc(napi_env env, napi_callback_info info) {
   return v;
 }
 
+// GL dialect: true if the frontend gave us a GLES context, false for desktop GL
+// core. Skia's GPU-composite (jsg_gpu_init) builds an ASSEMBLED GL interface that
+// segfaults on desktop glcore (GrGLCaps::initFormatTable), so the realm uses this
+// to skip the GPU-composite path on desktop GL.
+static bool g_is_gles_dialect = false;
+extern "C" void jsg_gl_set_dialect(int is_gles) { g_is_gles_dialect = is_gles != 0; }
+static napi_value jsg_gl_is_gles(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value v;
+  napi_get_boolean(env, g_is_gles_dialect, &v);
+  return v;
+}
+
 // JS accessor: jsgFboColorTexture(fboId) -> texture id (or 0).
 static napi_value jsg_gl_fbo_color_tex(napi_env env, napi_callback_info info) {
   size_t argc = 1;
@@ -243,6 +256,9 @@ extern "C" napi_value jsg_gl_register(napi_env env, napi_value exports) {
   napi_create_function(env, "jsgGetProcAddress", NAPI_AUTO_LENGTH,
                        jsg_gl_get_proc, nullptr, &pfn);
   napi_set_named_property(env, exports, "jsgGetProcAddress", pfn);
+  napi_value gfn;
+  napi_create_function(env, "jsgIsGles", NAPI_AUTO_LENGTH, jsg_gl_is_gles, nullptr, &gfn);
+  napi_set_named_property(env, exports, "jsgIsGles", gfn);
   napi_value sfn;
   napi_create_function(env, "jsgSceneTexture", NAPI_AUTO_LENGTH,
                        jsg_gl_scene_texture, nullptr, &sfn);

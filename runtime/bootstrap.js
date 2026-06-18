@@ -73,6 +73,10 @@ globalThis.__jsg_begin = () => {
   const s = session;
   if (!s || s.begun || !s.entry) return;
   s.begun = true;
+  // Restore localStorage from SAVE_RAM NOW — __jsg_begin runs from retro_run, so
+  // the frontend has already loaded the .srm into the buffer (it does so after
+  // retro_load_game). Doing this at realm construction would read empty SRAM.
+  try { s.realm.restoreLocalStorage(); } catch (e) { logErr('sram restore: ' + e.message); }
   Promise.all([
     import('./vendor/webaudio/LibretroAudioContext.js')
       .then((m) => { s.realm.setAudioContextClass(m.LibretroAudioContext); log('webaudio engine ready'); })

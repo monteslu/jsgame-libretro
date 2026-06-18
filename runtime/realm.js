@@ -69,7 +69,15 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
           // Init the process Ganesh GrContext from the frontend's GL loader so
           // the DISPLAY 2D canvas can be GPU-backed (drawImage(glCanvas) becomes
           // a GPU->GPU blit, no readback). Best-effort: null on CPU-only Skia.
-          if (!glState.gpuInited && glb.jsgGetProcAddress && displayCanvas.jsgGpuInit) {
+          //
+          // ONLY on a GLES context. On desktop GL core (glcore), Skia's
+          // GrGLMakeAssembledInterface SEGFAULTS in GrGLCaps::initFormatTable
+          // (a native crash a JS try/catch can't catch). A game that renders to
+          // the WebGL display canvas presents its FBO DIRECTLY and doesn't need
+          // GPU-composite, so skipping it on desktop GL loses nothing but the
+          // crash. (jsgIsGles is set by the core from the negotiated context.)
+          const glesCtx = !glb.jsgIsGles || glb.jsgIsGles();
+          if (glesCtx && !glState.gpuInited && glb.jsgGetProcAddress && displayCanvas.jsgGpuInit) {
             glState.gpuInited = true;
             try {
               const proc = glb.jsgGetProcAddress();
@@ -230,8 +238,17 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
   }
 
   // ── localStorage → SRAM (magic 'JSG1' + u32 length + JSON) ─────────────
+  // IMPORTANT timing: the realm is BUILT during retro_load_game, but RetroArch
+  // loads the .srm file into the SAVE_RAM buffer AFTER retro_load_game returns.
+  // So we must NOT read SRAM here at construction (it's still empty → every cold
+  // boot would start fresh, losing saves). The restore is deferred and run once
+  // by the host right before the game entry (__jsg_begin, in retro_run), by which
+  // point the .srm is loaded. restoreLocalStorage() is idempotent.
   const store = new Map();
-  (() => {
+  let lsRestored = false;
+  function restoreLocalStorage() {
+    if (lsRestored) return;
+    lsRestored = true;
     const sram = io.sramRead();
     if (sram && sram.length > 8 && sram[0] === 0x4a && sram[1] === 0x53 &&
         sram[2] === 0x47 && sram[3] === 0x31) {
@@ -244,7 +261,7 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
         } catch { /* corrupt — start fresh */ }
       }
     }
-  })();
+  }
   function persist() {
     const json = Buffer.from(JSON.stringify(Object.fromEntries(store)));
     const sramSize = io.sramRead() ? io.sramRead().length : 0;
@@ -750,6 +767,9 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
       // Reused buffer — pushAudio copies synchronously, safe.
       return ctx.pullFrames(numFrames);
     },
+    // Restore localStorage from SAVE_RAM. Call AFTER the frontend has loaded the
+    // .srm (the host calls this at begin-time, before the entry runs).
+    restoreLocalStorage,
     async runEntry(entryPath) {
       const mod = loadModule(entryPath);
       await linkAndEvaluate(mod);

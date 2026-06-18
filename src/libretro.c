@@ -80,6 +80,11 @@ static void context_reset(void) {
     // RetroArch's default FBO can change per frame — give the GL binding the
     // live getter so bindFramebuffer(null) always targets the CURRENT FBO.
     jsg_gl_set_fb_getter((void*)hw_render.get_current_framebuffer);
+    // Tell the GL binding the context dialect (GLES vs desktop GL core). The
+    // realm uses this to skip Skia's GPU-composite path on desktop GL, where
+    // GrGLMakeAssembledInterface segfaults (Bazzite/glcore).
+    extern void jsg_gl_set_dialect(int is_gles);
+    jsg_gl_set_dialect(gl_is_gles ? 1 : 0);
     // Init the software->GL blit (used when a WebGL game composites onto a 2D
     // display canvas — HW render is active so we can't software-present directly).
     gl_blit_ready = jsg_gl_blit_init((void*)hw_render.get_proc_address, gl_is_gles ? 1 : 0);
