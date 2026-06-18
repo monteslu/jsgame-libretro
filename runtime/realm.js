@@ -357,9 +357,14 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
       if (RealAudioContextClass) {
         const ctx = new RealAudioContextClass(opts);
         liveContexts.push(ctx);
+        log('AudioContext: real engine');
         return ctx;
       }
-      logErr('AudioContext created before engine ready — silent stub');
+      // A game created AudioContext before the engine loaded (e.g. at module top,
+      // before __jsg_begin set the class). This returns a SILENT stub — the game
+      // gets no sound. If you see this, the audio engine load is racing the game
+      // entry; the fix is to ensure setAudioContextClass runs first.
+      logErr('AudioContext created before engine ready — SILENT STUB (no sound for this game)');
       return new StubAudioContext();
     }
   }
