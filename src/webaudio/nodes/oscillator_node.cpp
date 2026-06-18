@@ -40,14 +40,6 @@ struct OscillatorNodeState {
     double current_time;
     bool has_started;
     bool has_stopped;
-
-    // Anti-click envelope: a short linear fade in on start / fade out on stop.
-    // A bare start/stop hard-switches the output (… ±0.9 -> 0) which is a broadband
-    // click/pop. Ramping over a few ms removes it, inaudible as a level change.
-    // env ramps 0->1 while starting, 1->0 while stopping; samples are multiplied by it.
-    float env;            // current envelope value [0,1]
-    float env_step;       // per-sample delta (set on start/stop)
-    bool stopping;        // fading out; deactivate when env hits 0
 };
 
 extern "C" {
@@ -71,17 +63,7 @@ OscillatorNodeState* createOscillatorNode(
     state->current_time = 0.0;
     state->has_started = false;
     state->has_stopped = false;
-    state->env = 0.0f;
-    state->env_step = 0.0f;
-    state->stopping = false;
     return state;
-}
-
-// ~3ms anti-click fade. Short enough to be inaudible as a level change, long
-// enough (≈144 samples @ 48k) to kill the start/stop click.
-static inline int osc_fade_samples(const OscillatorNodeState* s) {
-    int n = s->sample_rate * 3 / 1000;
-    return n < 1 ? 1 : n;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -139,21 +121,16 @@ void setOscillatorCurrentTime(OscillatorNodeState* state, double time) {
     if (!state) return;
     state->current_time = time;
 
-    // Check if we should start — begin a short fade-IN (env 0->1) to avoid a click.
+    // Check if we should start
     if (!state->has_started && state->scheduled_start_time >= 0.0 && state->current_time >= state->scheduled_start_time) {
         state->has_started = true;
         state->is_active = true;
-        state->env = 0.0f;
-        state->env_step = 1.0f / (float)osc_fade_samples(state);
-        state->stopping = false;
     }
 
-    // Check if we should stop — begin a fade-OUT (env 1->0); the process loop
-    // clears is_active once env reaches 0 (a hard cut here would click).
+    // Check if we should stop
     if (state->has_started && !state->has_stopped && state->scheduled_stop_time >= 0.0 && state->current_time >= state->scheduled_stop_time) {
         state->has_stopped = true;
-        state->stopping = true;
-        state->env_step = -1.0f / (float)osc_fade_samples(state);
+        state->is_active = false;
     }
 }
 
@@ -286,28 +263,6 @@ void processOscillatorNode(
             state->phase += phase_increment;
             if (state->phase >= 1.0) {
                 state->phase -= 1.0;
-            }
-        }
-    }
-
-    // Anti-click envelope: apply a per-frame fade when ramping in/out. When fully
-    // on (env==1, env_step==0) this is skipped for zero cost. When the fade-out
-    // completes, the oscillator goes silent and inactive (no hard cut = no click).
-    if (state->env_step != 0.0f || state->env < 1.0f) {
-        const int ch = state->channels;
-        for (int frame = 0; frame < frame_count; ++frame) {
-            float e = state->env;
-            for (int c = 0; c < ch; ++c) output[frame * ch + c] *= e;
-            state->env += state->env_step;
-            if (state->env >= 1.0f) { state->env = 1.0f; state->env_step = 0.0f; }
-            else if (state->env <= 0.0f) {
-                state->env = 0.0f;
-                if (state->stopping) {
-                    state->is_active = false; state->env_step = 0.0f; state->stopping = false;
-                    // Zero the remainder of the buffer after the fade-out.
-                    memset(&output[frame * ch], 0, (frame_count - frame) * ch * sizeof(float));
-                    break;
-                }
             }
         }
     }
