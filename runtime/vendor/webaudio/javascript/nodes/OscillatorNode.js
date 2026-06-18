@@ -30,8 +30,10 @@ export class OscillatorNode extends AudioNode {
         );
         this.detune = new AudioParam(context, nodeId, 'detune', detune, -4800.0, 4800.0);
 
-        // jsgame patch: go through the setter so setNodeParameter reaches the
-        // engine — createNode ignores options, and the C++ default is sawtooth.
+        // Go through the setter so setNodeParameter pushes the type to the engine.
+        // createNode ignores the type option and defaults the C oscillator, so a
+        // plain `new OscillatorNode({type:'sine'})` would otherwise stay the C
+        // default instead of the requested waveform.
         this.type = type;
         this._started = false;
         this._stopped = false;

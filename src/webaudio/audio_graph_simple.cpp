@@ -5,7 +5,6 @@
 #include <cstring>
 #include <vector>
 #include <map>
-#include <algorithm>
 #include <unordered_map>
 #include <cmath>
 
@@ -73,7 +72,6 @@ struct MediaStreamSourceNodeState;
 extern "C" {
     // Oscillator
     OscillatorNodeState* createOscillatorNode(int sample_rate, int channels, int wave_type);
-    void setOscillatorWaveType(OscillatorNodeState* state, int wave_type_int);
     void destroyOscillatorNode(OscillatorNodeState* state);
     void startOscillator(OscillatorNodeState* state, double when);
     void stopOscillator(OscillatorNodeState* state, double when);
@@ -190,66 +188,24 @@ extern "C" {
     void processMediaStreamSourceNode(MediaStreamSourceNodeState* state, float* output, int frame_count, int output_channels);
 }
 
-// ── Web Audio param automation timeline ─────────────────────────────────────
-// Per (node, param) list of scheduled events. The process loop evaluates the
-// value at the current graph time, so setValueAtTime / linear & exponential ramps
-// / setTargetAtTime actually change the param over time (envelopes, sweeps,
-// glides) instead of snapping to the last scheduled value.
-enum class AutoKind { SetValue, LinearRamp, ExpoRamp, SetTarget };
-struct ParamEvent {
-    AutoKind kind;
-    double time;       // when (seconds, graph clock)
-    float value;       // target value
-    float timeConstant;// setTargetAtTime only
-};
-struct ParamTimeline {
-    std::vector<ParamEvent> events;  // kept sorted by time
-    float baseValue = 0.0f;          // the param's current/intrinsic value
-    bool hasValue = false;           // baseValue was explicitly set (via .value)
-};
-
-// Evaluate a param's value at `t` per the Web Audio automation rules.
-static float eval_param(const ParamTimeline& tl, float fallback, double t) {
-    const auto& ev = tl.events;
-    if (ev.empty()) return tl.hasValue ? tl.baseValue : fallback;
-    // Value before the first event = the intrinsic/base value.
-    float prevVal = tl.hasValue ? tl.baseValue : fallback;
-    double prevTime = -1e300;
-    for (size_t i = 0; i < ev.size(); ++i) {
-        const ParamEvent& e = ev[i];
-        if (t < e.time) {
-            // We're between prev event and e — interpolate if e is a ramp.
-            if (e.kind == AutoKind::LinearRamp) {
-                double span = e.time - prevTime;
-                if (span <= 0) return e.value;
-                double f = (t - prevTime) / span;
-                return (float)(prevVal + (e.value - prevVal) * f);
-            }
-            if (e.kind == AutoKind::ExpoRamp) {
-                double span = e.time - prevTime;
-                if (span <= 0 || prevVal <= 0 || e.value <= 0) return prevVal;
-                double f = (t - prevTime) / span;
-                return (float)(prevVal * std::pow((double)e.value / prevVal, f));
-            }
-            if (e.kind == AutoKind::SetTarget) {
-                // Exponential approach toward target starting at e.time; before it,
-                // hold prevVal.
-                return prevVal;
-            }
-            // SetValue (or anything else) takes effect AT e.time; before it, hold.
-            return prevVal;
-        }
-        // t >= e.time: this event has taken effect.
-        if (e.kind == AutoKind::SetTarget) {
-            double tc = e.timeConstant > 1e-9 ? e.timeConstant : 1e-9;
-            float start = prevVal;
-            float v = (float)(e.value + (start - e.value) * std::exp(-(t - e.time) / tc));
-            prevVal = v; prevTime = t;
-        } else {
-            prevVal = e.value; prevTime = e.time;
-        }
-    }
-    return prevVal;
+// Param automation (utils/audio_param.cpp). AudioParamState holds the scheduled
+// automation events; getParamValueAtTime evaluates the value at a given time per
+// the Web Audio rules. These were never wired into the graph (audio_param.cpp
+// wasn't even compiled, and scheduleParameterValue was a no-op), so setValueAtTime
+// / linear & exponential ramps / setTarget did nothing — params snapped to their
+// last scheduled value, which silenced multi-point envelopes (e.g. a 0->1->0 gain
+// fade ended at 0).
+struct AudioParamState;
+extern "C" {
+    AudioParamState* createAudioParam(float default_value, float min_value, float max_value);
+    void destroyAudioParam(AudioParamState* state);
+    void setParamValue(AudioParamState* state, float value);
+    void setParamValueAtTime(AudioParamState* state, float value, double time);
+    void linearRampToValueAtTime(AudioParamState* state, float value, double time);
+    void exponentialRampToValueAtTime(AudioParamState* state, float value, double time);
+    void setTargetAtTime(AudioParamState* state, float target, double time, double time_constant);
+    void cancelScheduledParamValues(AudioParamState* state, double cancel_time);
+    float getParamValueAtTime(AudioParamState* state, double time, int sample_rate);
 }
 
 struct NodeState {
@@ -263,9 +219,9 @@ struct NodeState {
     float pan;               // stereo panner
     float offset;            // constant source
 
-    // Param automation timelines, keyed by ParamID (only the automatable ones
-    // are ever populated). Empty timeline → use the plain float value above.
-    std::map<int, ParamTimeline> param_timelines;
+    // Automation timelines per automatable param, keyed by ParamID. Lazily created
+    // on the first scheduled event; absent → use the plain float value above.
+    std::map<int, AudioParamState*> param_auto;
 
     // Pointers to external node states
     OscillatorNodeState* osc_state;
@@ -345,9 +301,6 @@ int createAudioGraph(int sample_rate, int channels, int buffer_size, bool is_rea
     // Pre-allocate processing buffers (assume max 128 frames for Web Audio quantum)
     graph->current_frame_count = 128;
     graph->temp_buffer.resize(128 * channels);
-    // jsgame fix: mix_buffer was never sized — .data() on an empty vector is
-    // nullptr. WASM masked it (writes to address 0 don't trap); native faults.
-    graph->mix_buffer.resize(128 * channels);
 
     // Create destination
     Node dest;
@@ -452,7 +405,8 @@ int createNode(int graph_id, const char* type_str) {
     if (type == "oscillator") {
         node.type = 1;
         NodeState* state = init_state();
-        // jsgame fix: creation default was 2 (sawtooth); Web Audio spec default is sine.
+        // Web Audio spec default is sine (0); the OscillatorNode setter pushes the
+        // requested type anyway, but make the unset default correct too.
         state->osc_state = createOscillatorNode(graph->sample_rate, graph->channels, 0);
         node.state = state;
     } else if (type == "gain") {
@@ -595,6 +549,35 @@ void stopNode(int graph_id, int node_id, double when) {
     }
 }
 
+// The node's current plain value for a param (used as the automation default and
+// as the fallback when no automation is scheduled).
+static float node_param_default(NodeState* st, int param_id) {
+    switch (param_id) {
+        case PARAM_FREQUENCY: return st->frequency;
+        case PARAM_DETUNE:    return st->detune;
+        case PARAM_GAIN:      return st->gain;
+        case PARAM_Q:         return st->filter_q;
+        case PARAM_DELAY_TIME:return st->delay_time;
+        case PARAM_PAN:       return st->pan;
+        case PARAM_OFFSET:    return st->offset;
+        default:              return 0.0f;
+    }
+}
+
+// Value of an automatable param at the graph's current time (or the plain float
+// fallback if no automation has been scheduled for it).
+static float param_value_now(AudioGraph* graph, NodeState* st, int param_id, float fallback) {
+    if (!st) return fallback;
+    auto a = st->param_auto.find(param_id);
+    if (a == st->param_auto.end() || !a->second) return fallback;
+    double t;
+    if (graph->is_realtime && graph->realtime_time_initialized)
+        t = (double)(graph->current_sample - graph->realtime_start_sample) / (double)graph->sample_rate;
+    else
+        t = (double)graph->current_sample / (double)graph->sample_rate;
+    return getParamValueAtTime(a->second, t, graph->sample_rate);
+}
+
 EMSCRIPTEN_KEEPALIVE
 void setNodeParameter(int graph_id, int node_id, int param_id, float value) {
     auto it = graphs.find(graph_id);
@@ -610,9 +593,6 @@ void setNodeParameter(int graph_id, int node_id, int param_id, float value) {
     if (node.type == 1) { // oscillator
         if (param_id == PARAM_FREQUENCY) node.state->frequency = value;
         else if (param_id == PARAM_DETUNE) node.state->detune = value;
-        // jsgame fix: PARAM_TYPE was silently ignored — every oscillator
-        // stayed the creation default (sawtooth). Spec default is sine.
-        else if (param_id == PARAM_TYPE) setOscillatorWaveType(node.state->osc_state, (int)value);
     } else if (node.type == 2) { // gain
         if (param_id == PARAM_GAIN) node.state->gain = value;
     } else if (node.type == 4 && node.state->biquad_state) { // biquad_filter
@@ -642,58 +622,10 @@ void setNodeParameter(int graph_id, int node_id, int param_id, float value) {
             setConstantSourceOffset(node.state->constant_source_state, value);
         }
     }
-    // Record as the timeline's base value too, so eval_param uses it before any
-    // scheduled events (AudioParam.value semantics).
-    auto& tl = node.state->param_timelines[param_id];
-    tl.baseValue = value; tl.hasValue = true;
-}
-
-// Schedule a param automation event (setValueAtTime / linearRamp / expoRamp /
-// setTargetAtTime). kind: 0=setValue, 1=linearRamp, 2=expoRamp, 3=setTarget,
-// 4=cancelScheduledValues. The process loop evaluates the value at the current
-// time, so the param actually changes over time.
-EMSCRIPTEN_KEEPALIVE
-void scheduleParamEvent(int graph_id, int node_id, int param_id, int kind,
-                        float value, double time, float timeConstant) {
-    auto it = graphs.find(graph_id);
-    if (it == graphs.end()) return;
-    AudioGraph* graph = it->second;
-    auto node_it = graph->nodes.find(node_id);
-    if (node_it == graph->nodes.end() || !node_it->second.state) return;
-    ParamTimeline& tl = node_it->second.state->param_timelines[param_id];
-
-    if (kind == 4) { // cancelScheduledValues — drop events at/after `time`
-        auto& ev = tl.events;
-        ev.erase(std::remove_if(ev.begin(), ev.end(),
-                 [&](const ParamEvent& e){ return e.time >= time; }), ev.end());
-        return;
-    }
-    ParamEvent e;
-    e.kind = kind == 1 ? AutoKind::LinearRamp
-           : kind == 2 ? AutoKind::ExpoRamp
-           : kind == 3 ? AutoKind::SetTarget
-           : AutoKind::SetValue;
-    e.time = time; e.value = value; e.timeConstant = timeConstant;
-    // Insert keeping the list sorted by time.
-    auto& ev = tl.events;
-    auto pos = std::upper_bound(ev.begin(), ev.end(), e.time,
-                 [](double tt, const ParamEvent& x){ return tt < x.time; });
-    ev.insert(pos, e);
-}
-
-// Current value of an automatable param at the graph's current time (or the
-// plain float fallback if no automation is scheduled).
-static float param_value_now(AudioGraph* graph, Node& node, int param_id, float fallback) {
-    if (!node.state) return fallback;
-    auto tli = node.state->param_timelines.find(param_id);
-    if (tli == node.state->param_timelines.end() || (tli->second.events.empty() && !tli->second.hasValue))
-        return fallback;
-    double t;
-    if (graph->is_realtime && graph->realtime_time_initialized)
-        t = (double)(graph->current_sample - graph->realtime_start_sample) / (double)graph->sample_rate;
-    else
-        t = (double)graph->current_sample / (double)graph->sample_rate;
-    return eval_param(tli->second, fallback, t);
+    // Keep the param's automation base value in sync (AudioParam.value semantics):
+    // if a timeline exists, its current_value is the value before any events.
+    auto a = node.state->param_auto.find(param_id);
+    if (a != node.state->param_auto.end() && a->second) setParamValue(a->second, value);
 }
 
 // Process a single node
@@ -759,14 +691,14 @@ void processNode(AudioGraph* graph, int node_id, float* output, int frame_count)
             }
             setOscillatorCurrentTime(node.state->osc_state, current_time);
 
-            // Call external SIMD-optimized oscillator (params evaluated at the
-            // current time so frequency/detune automation — glides — work).
+            // Call external SIMD-optimized oscillator. Params are evaluated at the
+            // current time so frequency/detune automation (glides) works.
             processOscillatorNode(
                 node.state->osc_state,
                 output,
                 frame_count,
-                param_value_now(graph, node, PARAM_FREQUENCY, node.state->frequency),
-                param_value_now(graph, node, PARAM_DETUNE, node.state->detune)
+                param_value_now(graph, node.state, PARAM_FREQUENCY, node.state->frequency),
+                param_value_now(graph, node.state, PARAM_DETUNE, node.state->detune)
             );
         }
 
@@ -805,15 +737,14 @@ void processNode(AudioGraph* graph, int node_id, float* output, int frame_count)
                 }
             }
 
-            // Call external SIMD-optimized gain (value evaluated at the current
-            // time so gain automation — envelopes/fades — works; per-block, which
-            // is ~2.7ms at 48k/128 — fine for declick ramps).
+            // Call external SIMD-optimized gain. Value evaluated at the current
+            // time so gain automation (envelopes/fades) works (per-block).
             processGainNode(
                 node.state->gain_state,
                 output,  // input
                 output,  // output (in-place)
                 frame_count,
-                param_value_now(graph, node, PARAM_GAIN, node.state->gain),
+                param_value_now(graph, node.state, PARAM_GAIN, node.state->gain),
                 has_input
             );
         }
@@ -1285,7 +1216,30 @@ EMSCRIPTEN_KEEPALIVE void disconnectNodes(int, int, int) {}
 EMSCRIPTEN_KEEPALIVE void setNodePeriodicWave(int, int, float*, int) {}
 EMSCRIPTEN_KEEPALIVE void setNodeProperty(int, int, const char*, float) {}
 EMSCRIPTEN_KEEPALIVE void setNodeStringProperty(int, int, const char*, const char*) {}
-EMSCRIPTEN_KEEPALIVE void scheduleParameterValue(int, int, const char*, float, double) {}
-EMSCRIPTEN_KEEPALIVE void scheduleParameterRamp(int, int, const char*, float, double, bool) {}
+
+// Schedule a param automation event, wiring the AudioParamState automation into
+// the graph. kind: 0=setValueAtTime, 1=linearRamp, 2=exponentialRamp,
+// 3=setTarget, 4=cancelScheduledValues. The process loop reads the value at the
+// current time (param_value_now), so the param actually changes over time
+// (envelopes, ramps, sweeps). (Replaces the old string-based no-op stubs.)
+EMSCRIPTEN_KEEPALIVE
+void scheduleParamEvent(int graph_id, int node_id, int param_id, int kind,
+                        float value, double time, float timeConstant) {
+    auto it = graphs.find(graph_id);
+    if (it == graphs.end()) return;
+    auto node_it = it->second->nodes.find(node_id);
+    if (node_it == it->second->nodes.end() || !node_it->second.state) return;
+    NodeState* st = node_it->second.state;
+    AudioParamState*& ap = st->param_auto[param_id];
+    if (!ap) ap = createAudioParam(node_param_default(st, param_id), -3.4e38f, 3.4e38f);
+    switch (kind) {
+        case 0: setParamValueAtTime(ap, value, time); break;
+        case 1: linearRampToValueAtTime(ap, value, time); break;
+        case 2: exponentialRampToValueAtTime(ap, value, time); break;
+        case 3: setTargetAtTime(ap, value, time, timeConstant); break;
+        case 4: cancelScheduledParamValues(ap, time); break;
+        default: setParamValueAtTime(ap, value, time); break;
+    }
+}
 
 } // extern "C"

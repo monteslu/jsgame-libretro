@@ -2,6 +2,7 @@
 // All heavy lifting (graph traversal, mixing, processing) is done in WASM
 
 import { wasmModule as defaultWasmModule } from './WasmModule.js';
+import { WasmAudioDecoders } from './WasmAudioDecoders.js';
 
 // Parameter name to ID mapping - matches C++ ParamID enum
 // Eliminates malloc/copy/free overhead on every parameter change
@@ -162,29 +163,52 @@ export class WasmAudioEngine {
         this.wasmModule._free(fbPtr);
     }
 
-    scheduleParameterValue(nodeId, paramName, value, time) {
-        const lengthBytes = this.wasmModule.lengthBytesUTF8(paramName) + 1;
-        const paramNamePtr = this.wasmModule._malloc(lengthBytes);
-        this.wasmModule.stringToUTF8(paramName, paramNamePtr, lengthBytes);
-
-        this.wasmModule._scheduleParameterValue(this.graphId, nodeId, paramNamePtr, value, time);
-        this.wasmModule._free(paramNamePtr);
-    }
-
-    scheduleParameterRamp(nodeId, paramName, value, time, exponential) {
-        const lengthBytes = this.wasmModule.lengthBytesUTF8(paramName) + 1;
-        const paramNamePtr = this.wasmModule._malloc(lengthBytes);
-        this.wasmModule.stringToUTF8(paramName, paramNamePtr, lengthBytes);
-
-        this.wasmModule._scheduleParameterRamp(
-            this.graphId,
-            nodeId,
-            paramNamePtr,
-            value,
-            time,
-            exponential
-        );
-        this.wasmModule._free(paramNamePtr);
+    // AudioParam automation. Every method (setValueAtTime / linear & exponential
+    // ramps / setTarget / setValueCurve / cancel*) routes here as:
+    //   (nodeId, paramName, KIND, value, time, extra)
+    // We push the event onto the wasm param TIMELINE (scheduleParamEvent), which
+    // the audio thread evaluates at the current time so the value actually changes
+    // over time. (Previously this called a no-op C stub and mis-read the args —
+    // the KIND string was taken as the value — so automation did nothing and
+    // multi-point envelopes collapsed to their last value.)
+    scheduleParameterValue(nodeId, paramName, kind, value, time, extra) {
+        const paramId = PARAM_ID_MAP[paramName];
+        if (paramId === undefined) return;
+        // kind int for wasm: 0 setValue, 1 linearRamp, 2 expoRamp, 3 setTarget,
+        // 4 cancelScheduledValues/cancelAndHoldAtTime.
+        switch (kind) {
+            case 'setValueAtTime':
+                this.wasmModule._scheduleParamEvent(this.graphId, nodeId, paramId, 0, value, time, 0);
+                return;
+            case 'linearRampToValueAtTime':
+                this.wasmModule._scheduleParamEvent(this.graphId, nodeId, paramId, 1, value, time, 0);
+                return;
+            case 'exponentialRampToValueAtTime':
+                this.wasmModule._scheduleParamEvent(this.graphId, nodeId, paramId, 2, value, time, 0);
+                return;
+            case 'setTargetAtTime':
+                this.wasmModule._scheduleParamEvent(this.graphId, nodeId, paramId, 3, value, time, extra || 0);
+                return;
+            case 'cancelScheduledValues':
+            case 'cancelAndHoldAtTime':
+                // value carries the cancel TIME for these.
+                this.wasmModule._scheduleParamEvent(this.graphId, nodeId, paramId, 4, 0, value, 0);
+                return;
+            case 'setValueCurveAtTime':
+                // Approximate a value curve as setValueAtTime points across
+                // [time, time+duration]. value=array, time=start, extra=duration.
+                if (Array.isArray(value) && value.length > 0 && extra > 0) {
+                    const n = value.length, dur = extra;
+                    for (let i = 0; i < n; i++) {
+                        const tt = time + (dur * i) / (n - 1 || 1);
+                        this.wasmModule._scheduleParamEvent(this.graphId, nodeId, paramId, 0, value[i], tt, 0);
+                    }
+                }
+                return;
+            default:
+                this.wasmModule._scheduleParamEvent(this.graphId, nodeId, paramId, 0, value, time, 0);
+                return;
+        }
     }
 
     startNode(nodeId, when = 0) {
@@ -195,14 +219,36 @@ export class WasmAudioEngine {
         this.wasmModule._stopNode(this.graphId, nodeId, when);
     }
 
-    registerBuffer(bufferId, bufferData, length, channels) {
-        const totalSamples = length * channels;
+    registerBuffer(bufferId, bufferData, length, channels, sourceSampleRate = this.sampleRate) {
+        let registeredBuffer = {
+            audioData: bufferData,
+            length
+        };
+
+        if (sourceSampleRate !== this.sampleRate) {
+            registeredBuffer = WasmAudioDecoders.resampleAudio(
+                this.wasmModule,
+                bufferData,
+                length,
+                channels,
+                sourceSampleRate,
+                this.sampleRate
+            );
+        }
+
+        const totalSamples = registeredBuffer.length * channels;
         const bufferPtr = this.wasmModule._malloc(totalSamples * 4);
 
         // Use HEAPF32.set() with subarray (avoids alignment issues and is fast)
-        copyToWasmHeap(this.wasmModule, bufferData, bufferPtr);
+        copyToWasmHeap(this.wasmModule, registeredBuffer.audioData, bufferPtr);
 
-        this.wasmModule._registerBuffer(this.graphId, bufferId, bufferPtr, length, channels);
+        this.wasmModule._registerBuffer(
+            this.graphId,
+            bufferId,
+            bufferPtr,
+            registeredBuffer.length,
+            channels
+        );
         // Don't free - WASM keeps a reference
     }
 
