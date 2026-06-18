@@ -17,6 +17,7 @@ void disconnectNodes(int, int, int);
 void startNode(int graph_id, int node_id, double when);
 void stopNode(int graph_id, int node_id, double when);
 void setNodeParameter(int graph_id, int node_id, int param_id, float value);
+void scheduleParamEvent(int graph_id, int node_id, int param_id, int kind, float value, double time, float timeConstant);
 void processGraph(int graph_id, float* output, int frame_count);
 double getGraphCurrentTime(int graph_id);
 void setGraphCurrentTime(int graph_id, double time);
@@ -70,6 +71,8 @@ FN(a_stopNode) { ARGS(3); stopNode((int)N(0), (int)N(1), N(2)); return nullptr; 
 // param_id arrives as a NUMBER (the JS NativeAudioEngine converts the param name
 // string → ParamID before calling native), so (int)N(2) is correct here.
 FN(a_setNodeParameter) { ARGS(4); setNodeParameter((int)N(0), (int)N(1), (int)N(2), (float)N(3)); return nullptr; }
+// scheduleParamEvent(graphId, nodeId, paramId, kind, value, time, timeConstant)
+FN(a_scheduleParamEvent) { ARGS(7); scheduleParamEvent((int)N(0), (int)N(1), (int)N(2), (int)N(3), (float)N(4), N(5), (float)N(6)); return nullptr; }
 FN(a_getCurrentTime) { ARGS(1); return mknum(env, getGraphCurrentTime((int)N(0))); }
 FN(a_setCurrentTime) { ARGS(2); setGraphCurrentTime((int)N(0), N(1)); return nullptr; }
 
@@ -154,6 +157,7 @@ extern "C" napi_value jsg_audio_register(napi_env env, napi_value exports) {
       {"createNode", a_createNode}, {"connectNodes", a_connectNodes},
       {"disconnectNodes", a_disconnectNodes}, {"startNode", a_startNode},
       {"stopNode", a_stopNode}, {"setNodeParameter", a_setNodeParameter},
+      {"scheduleParamEvent", a_scheduleParamEvent},
       {"getCurrentTime", a_getCurrentTime}, {"setCurrentTime", a_setCurrentTime},
       {"processGraph", a_processGraph}, {"setNodeBuffer", a_setNodeBuffer},
       {"registerBuffer", a_registerBuffer}, {"setNodeBufferId", a_setNodeBufferId},

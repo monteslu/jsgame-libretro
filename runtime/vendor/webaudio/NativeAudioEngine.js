@@ -60,15 +60,44 @@ export class WasmAudioEngine {
     }
     native.setNodeParameter(this.graphId, nodeId, paramId, value);
   }
-  // AudioParam.setValueAtTime calls this as (nodeId, paramName, kind, value,
-  // startTime) — note the KIND string ('setValueAtTime') is arg 3, the VALUE is
-  // arg 4. The old signature named arg 3 'value', so the oscillator frequency was
-  // set to the string 'setValueAtTime' (= NaN/0) → silent oscillators. We don't
-  // model the automation timeline; apply the value immediately so setValueAtTime
-  // code is audible.
-  // Used by setValueAtTime AND all the ramp/target methods (same call shape).
-  scheduleParameterValue(nodeId, paramName, kind, value /*, startTime */) {
-    this.setNodeParameter(nodeId, paramName, value);
+  // AudioParam automation. Every method (setValueAtTime / linearRamp / expoRamp /
+  // setTarget / setValueCurve / cancel*) routes here as:
+  //   (nodeId, paramName, KIND, value, time, extra)
+  // We push the event onto the native param TIMELINE so it actually changes over
+  // time (envelopes, sweeps). Earlier this applied the value immediately, which
+  // collapsed a multi-point envelope to its last point (e.g. a 0→1→0 gain fade
+  // ended at 0 = silence).
+  scheduleParameterValue(nodeId, paramName, kind, value, time, extra) {
+    const paramId = PARAM_ID_MAP[paramName];
+    if (paramId === undefined) { stubWarn('param:' + paramName); return; }
+    // kind int for native: 0 setValue, 1 linearRamp, 2 expoRamp, 3 setTarget,
+    // 4 cancelScheduledValues/cancelAndHoldAtTime.
+    let k;
+    switch (kind) {
+      case 'setValueAtTime': k = 0; break;
+      case 'linearRampToValueAtTime': k = 1; break;
+      case 'exponentialRampToValueAtTime': k = 2; break;
+      case 'setTargetAtTime': k = 3; break;
+      case 'cancelScheduledValues':
+      case 'cancelAndHoldAtTime':
+        // value carries the cancel TIME for these (AudioParam passes (… , cancelTime)).
+        native.scheduleParamEvent(this.graphId, nodeId, paramId, 4, 0, value, 0);
+        return;
+      case 'setValueCurveAtTime':
+        // Approximate a value curve as a sequence of setValueAtTime points across
+        // [time, time+duration]. value=array, time=start, extra=duration.
+        if (Array.isArray(value) && value.length > 0 && extra > 0) {
+          const n = value.length, dur = extra;
+          for (let i = 0; i < n; i++) {
+            const tt = time + (dur * i) / (n - 1 || 1);
+            native.scheduleParamEvent(this.graphId, nodeId, paramId, 0, value[i], tt, 0);
+          }
+        }
+        return;
+      default: k = 0; break;
+    }
+    const tc = (kind === 'setTargetAtTime') ? (extra || 0) : 0;
+    native.scheduleParamEvent(this.graphId, nodeId, paramId, k, value, time, tc);
   }
 
   setNodeProperty(nodeId, propName, value) {
