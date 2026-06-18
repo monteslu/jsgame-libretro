@@ -60,9 +60,14 @@ export class WasmAudioEngine {
     }
     native.setNodeParameter(this.graphId, nodeId, paramId, value);
   }
-  // Upstream's scheduleParameterValue is an empty stub in the engine too;
-  // approximate immediate application so setValueAtTime-style code audibly works.
-  scheduleParameterValue(nodeId, paramName, value) {
+  // AudioParam.setValueAtTime calls this as (nodeId, paramName, kind, value,
+  // startTime) — note the KIND string ('setValueAtTime') is arg 3, the VALUE is
+  // arg 4. The old signature named arg 3 'value', so the oscillator frequency was
+  // set to the string 'setValueAtTime' (= NaN/0) → silent oscillators. We don't
+  // model the automation timeline; apply the value immediately so setValueAtTime
+  // code is audible.
+  // Used by setValueAtTime AND all the ramp/target methods (same call shape).
+  scheduleParameterValue(nodeId, paramName, kind, value /*, startTime */) {
     this.setNodeParameter(nodeId, paramName, value);
   }
 

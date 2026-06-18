@@ -67,6 +67,8 @@ FN(a_connectNodes) { ARGS(5); connectNodes((int)N(0), (int)N(1), (int)N(2), (int
 FN(a_disconnectNodes) { ARGS(3); disconnectNodes((int)N(0), (int)N(1), (int)N(2)); return nullptr; }
 FN(a_startNode) { ARGS(3); startNode((int)N(0), (int)N(1), N(2)); return nullptr; }
 FN(a_stopNode) { ARGS(3); stopNode((int)N(0), (int)N(1), N(2)); return nullptr; }
+// param_id arrives as a NUMBER (the JS NativeAudioEngine converts the param name
+// string → ParamID before calling native), so (int)N(2) is correct here.
 FN(a_setNodeParameter) { ARGS(4); setNodeParameter((int)N(0), (int)N(1), (int)N(2), (float)N(3)); return nullptr; }
 FN(a_getCurrentTime) { ARGS(1); return mknum(env, getGraphCurrentTime((int)N(0))); }
 FN(a_setCurrentTime) { ARGS(2); setGraphCurrentTime((int)N(0), N(1)); return nullptr; }
