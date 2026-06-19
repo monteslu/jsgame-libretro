@@ -298,9 +298,18 @@ int createAudioGraph(int sample_rate, int channels, int buffer_size, bool is_rea
     graph->realtime_start_sample = 0;
     graph->realtime_time_initialized = false;
 
-    // Pre-allocate processing buffers (assume max 128 frames for Web Audio quantum)
+    // Pre-allocate processing buffers (assume max 128 frames for Web Audio quantum).
+    // BOTH temp_buffer AND mix_buffer must be sized — mix_buffer is used for the
+    // buffersource/source -> gain -> destination path (processNode type-2 branch).
+    // It was previously left empty here, and the resize in processGraph only runs
+    // when frame_count changes from 128 — which it never does (the host always
+    // renders 128-frame quanta) — so mix_buffer stayed size 0 and writing a
+    // buffer-source-through-gain into mix_buffer.data() overran -> SIGSEGV in
+    // processBufferSourceNode. (Games whose sounds go straight to destination use
+    // temp_buffer, which WAS sized, so they didn't crash.)
     graph->current_frame_count = 128;
     graph->temp_buffer.resize(128 * channels);
+    graph->mix_buffer.resize(128 * channels);
 
     // Create destination
     Node dest;
@@ -955,13 +964,16 @@ void processGraph(int graph_id, float* output, int frame_count) {
     // Clear cache for next frame
     graph->node_buffers.clear();
 
-    // Ensure temp_buffer and mix_buffer are large enough
+    // Ensure temp_buffer and mix_buffer are large enough. Grow if the requested
+    // block is bigger than what we have (use < not != so we never under-size, and
+    // both buffers are always grown together).
     const int buffer_size = frame_count * graph->channels;
-    if (graph->current_frame_count != frame_count) {
-        graph->current_frame_count = frame_count;
+    if ((int)graph->temp_buffer.size() < buffer_size ||
+        (int)graph->mix_buffer.size() < buffer_size) {
         graph->temp_buffer.resize(buffer_size);
         graph->mix_buffer.resize(buffer_size);
     }
+    graph->current_frame_count = frame_count;
 
     // Process destination node (pulls entire graph)
     processNode(graph, graph->dest_id, output, frame_count);

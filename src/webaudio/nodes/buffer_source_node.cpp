@@ -73,6 +73,7 @@ void setBufferSourceBuffer(BufferSourceNodeState* state, float* buffer_data, int
 
     // Allocate and copy buffer data
     int total_samples = buffer_frames * buffer_channels;
+    if (buffer_frames <= 0 || buffer_channels <= 0) { state->buffer_data = nullptr; state->buffer_frames = 0; state->buffer_channels = 0; return; }
     state->buffer_data = new float[total_samples];
     memcpy(state->buffer_data, buffer_data, total_samples * sizeof(float));
 
@@ -182,6 +183,23 @@ void processBufferSourceNode(
                            ? (frame_count - frames_written)
                            : frames_available;
 
+        // UNIVERSAL BOUNDS CLAMP (all channel branches). frames_to_copy must not
+        // read past buffer_data (buffer_frames) nor write past output
+        // (frame_count). A bad buffer_frames/current_frame (e.g. a mis-sized
+        // registered buffer) would otherwise overrun -> SIGSEGV in the SIMD copy.
+        {
+            int max_in = state->buffer_frames - state->current_frame;
+            int max_out = frame_count - frames_written;
+            if (frames_to_copy > max_in) frames_to_copy = max_in;
+            if (frames_to_copy > max_out) frames_to_copy = max_out;
+            if (frames_to_copy < 0) frames_to_copy = 0;
+            if (state->current_frame < 0 || state->buffer_channels <= 0 || state->channels <= 0) {
+                memset(output, 0, frame_count * (state->channels>0?state->channels:2) * sizeof(float));
+                return;
+            }
+        }
+        if (frames_to_copy == 0 && state->current_frame >= state->buffer_frames) { frames_written++; continue; }
+
         // Handle channel mismatch
         if (state->buffer_channels == state->channels) {
             // Same channel count - direct SIMD copy
@@ -189,7 +207,20 @@ void processBufferSourceNode(
             float* dst = &output[frames_written * state->channels];
             int samples_to_copy = frames_to_copy * state->channels;
 
-            CopyBufferData(src, dst, samples_to_copy);
+            // GUARD: never read past buffer_data or write past output (frame_count*channels).
+            long src_end = (long)(state->current_frame + frames_to_copy) * state->buffer_channels;
+            long dst_end = (long)(frames_written + frames_to_copy) * state->channels;
+            long buf_cap = (long)state->buffer_frames * state->buffer_channels;
+            long out_cap = (long)frame_count * state->channels;
+            if (src_end > buf_cap || dst_end > out_cap || samples_to_copy < 0) {
+                // clamp to whatever fits to avoid the crash
+                long max_frames = (buf_cap - (long)state->current_frame*state->buffer_channels)/ (state->buffer_channels?state->buffer_channels:1);
+                long max_out = (out_cap - (long)frames_written*state->channels)/(state->channels?state->channels:1);
+                if (max_frames < frames_to_copy) frames_to_copy = (int)(max_frames<0?0:max_frames);
+                if (max_out < frames_to_copy) frames_to_copy = (int)(max_out<0?0:max_out);
+                samples_to_copy = frames_to_copy * state->channels;
+            }
+            if (samples_to_copy > 0) CopyBufferData(src, dst, samples_to_copy);
 
         } else if (state->buffer_channels == 1 && state->channels > 1) {
             // Mono buffer to multi-channel output (upmix)
