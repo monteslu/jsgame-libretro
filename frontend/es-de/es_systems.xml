@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!--
+  ES-DE custom system for jsgame-libretro (JavaScript web games via libretro).
+
+  Install: copy this into ES-DE's custom_systems/ (the supported user-add path that
+  is NOT clobbered on ES-DE update):
+    ~/ES-DE/custom_systems/es_systems.xml         (native ES-DE)
+    ~/retrodeck/ES-DE/custom_systems/es_systems.xml   (RetroDeck flatpak)
+  Put your games in %ROMPATH%/jsgames/ as .jsgame files and the core .so where the
+  <command> points. A full RetroDeck/ES-DE RESTART is required (the systems config
+  is cached at startup; reloading the gamelist is not enough).
+
+  Theme note: <theme>jsgames</theme> is intentionally a name no stock theme defines,
+  so ES-DE shows the <fullname> as text and (with a logos/jsgames.svg dropped into
+  the theme) our own logo — instead of borrowing another system's name+icon (e.g.
+  <theme>pc</theme> renders as "IBM PC", <theme>ports</theme> as "Ports"). See
+  logos/jsgames.svg + frontend/es-de/README.md.
+-->
+<systemList>
+  <system>
+    <name>jsgames</name>
+    <fullname>JS Games (jsgame)</fullname>
+    <path>%ROMPATH%/jsgames</path>
+    <extension>.jsgame .JSGAME</extension>
+    <command>%EMULATOR_RETROARCH% -L %CORE_RETROARCH%/jsgame_libretro.so %ROM%</command>
+    <platform>pc</platform>
+    <theme>jsgames</theme>
+  </system>
+</systemList>
