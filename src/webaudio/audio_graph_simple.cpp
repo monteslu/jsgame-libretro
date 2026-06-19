@@ -1080,9 +1080,25 @@ void registerBuffer(int graph_id, int buffer_id, float* buffer_data, int buffer_
 
     AudioGraph* graph = it->second;
 
-    // Store buffer data in registry
+    // COPY the buffer data — own it. buffer_data points into a JS-owned typed array
+    // (under the native N-API host, NOT a stable WASM heap), so aliasing it would
+    // dangle the moment V8 GCs/moves the ArrayBuffer → a later read in
+    // processBufferSourceNode reads freed memory (SIGSEGV when a sound plays). And
+    // destroyAudioGraph free()s bd.data, which is only valid if we malloc'd it. The
+    // old code aliased the pointer (the "not copied" comment was the bug). Copy it.
+    if (!buffer_data || buffer_frames <= 0 || buffer_channels <= 0) return;
+    size_t total = (size_t)buffer_frames * (size_t)buffer_channels;
+
+    // Free any previously-registered buffer for this id before overwriting.
+    auto existing = graph->buffers.find(buffer_id);
+    if (existing != graph->buffers.end() && existing->second.data) {
+        free(existing->second.data);
+    }
+
     BufferData bd;
-    bd.data = buffer_data;  // Pointer to WASM heap, not copied
+    bd.data = (float*)malloc(total * sizeof(float));
+    if (!bd.data) return;
+    memcpy(bd.data, buffer_data, total * sizeof(float));
     bd.frames = buffer_frames;
     bd.channels = buffer_channels;
 
