@@ -468,3 +468,47 @@ redirect (e.g. a file that includes `<GLES3/gl3.h>` but not `gl_procs.h`).
 → ANGLE sidecars; even spun up its own EGL context in the core). It caused real
 Android debugging grief — the core fought the frontend's GLES context instead of
 using it. Same fix applied there. See `wasmcart-libretro/doc/dev_notes.md`.
+
+## 14. ES-DE / RetroDeck: the "JS Games" category (it's `<theme>`, NOT `<fullname>`)
+
+This is a frontend-integration note, not a core concern — the core knows nothing
+about ES-DE (it just gets launched). But getting `.jsgame` files to show as a proper
+**"JS Games"** category in ES-DE/RetroDeck cost real time on wrong assumptions.
+
+**The rule:** ES-DE picks a system's **displayed name AND logo from the `<theme>`
+tag** (`${system.theme}`), **not** from `<fullname>`. So pointing `<theme>` at an
+existing system **borrows that system's identity**:
+- `<theme>pc</theme>` → renders as **"IBM PC"** with the IBM logo.
+- `<theme>ports</theme>` → renders as **"Ports"**.
+
+`<fullname>JS Games</fullname>` is ignored for the carousel label in both cases.
+
+**The fix:** use a `<theme>` value **no stock theme defines** (`jsgames`). ES-DE then
+falls back to showing `<fullname>` as text + whatever logo you drop in for that name.
+From the ES-DE source (`es-core/.../CarouselComponent`, RetroDECK/ES-DE
+retrodeck-main): a carousel item is the `staticImage` (`${artworkSource}/${system.theme}.png`)
+if the file exists, else the `defaultImage` (`_default.png`), else the full-name
+text; the `system-logo` element separately overlays `${logoSource}/${system.theme}.svg`.
+
+**Logo gotcha — ES-DE renders theme SVGs with nanosvg, which does NOT render
+`<text>`:** a wordmark built with `<text>` is **invisible** (only ~4 of art-book-next's
+212 stock logos use `<text>`, and those rely on being pre-outlined). Our
+`logos/jsgames.svg` is pixel-block letters drawn as `<rect>`s (paths only), white-fill
+so the theme recolors via `${systemLogoColor}`. Regenerate with `frontend/es-de/gen-logo.py`.
+
+**Where it all lives / install:**
+- Repo assets: `frontend/es-de/` — `es_systems.xml` (portable: `%ROMPATH%` /
+  `%EMULATOR_RETROARCH%` / `%CORE_RETROARCH%`, no hardcoded paths), `logos/jsgames.svg`,
+  `gen-logo.py`, `README.md`.
+- Install the system into `custom_systems/es_systems.xml` — the **supported user-add
+  path that ES-DE does NOT overwrite on update** (everything else under ES-DE config
+  is read-only; ROM folders are editable).
+- Drop `logos/jsgames.svg` into the active theme's `_inc/systems/logos/` (theme files
+  DO get clobbered on a theme update — re-copy after). For art-book-next, also place a
+  `jsgames.png` in each `artwork*/` variant dir (artworkSource resolves to one per the
+  user's chosen style).
+- On RetroDeck, if the core isn't where `%CORE_RETROARCH%` points (read-only `/app`),
+  use an absolute `-L /path/to/jsgame_libretro.so` in `<command>` instead.
+
+**A full ES-DE/RetroDeck RESTART is required** — the systems config is read once at
+startup; "reload gamelist" does not pick up a new custom system.
