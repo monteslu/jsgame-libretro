@@ -104,12 +104,13 @@ export class LibretroAudioContext {
         numberOfChannels: decoded.channels,
         sampleRate: this.sampleRate,
       });
-      for (let ch = 0; ch < decoded.channels; ch++) {
-        const channelData = audioBuffer._channels[ch];
-        for (let frame = 0; frame < decoded.length; frame++) {
-          channelData[frame] = decoded.audioData[frame * decoded.channels + ch];
-        }
-      }
+      // The decoder already returns interleaved float — adopt it directly instead
+      // of a per-sample de-interleave loop. For multi-minute tracks that loop was
+      // tens of millions of iterations on the main thread (the source of the
+      // startup / boss-music fps stalls); the engine wants interleaved anyway, so
+      // the de-interleave + later re-interleave were pure wasted work. _channels
+      // stay lazy (only built if the game reads getChannelData).
+      audioBuffer._setInterleavedBuffer(decoded.audioData);
       if (successCallback) successCallback(audioBuffer);
       return audioBuffer;
     } catch (err) {
