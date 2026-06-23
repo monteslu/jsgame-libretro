@@ -102,50 +102,101 @@ FN(a_registerBuffer) {
 }
 FN(a_setNodeBufferId) { ARGS(3); setNodeBufferId((int)N(0), (int)N(1), (int)N(2)); return nullptr; }
 
-// decode(bytes: Uint8Array, targetRate) -> { channels, length, sampleRate, data: Float32Array }
-// Decoded (and resampled if needed) interleaved float32.
+// decode(bytes: Uint8Array, targetRate) -> Promise<{ channels, length, sampleRate, data: Float32Array }>
+//
+// ASYNC, like the browser: decodeAudioData must not block the JS thread. The decode
+// + resample run on libnode's libuv thread pool (the Execute callback, which makes
+// NO napi calls), and the result is built + the promise settled on the JS thread
+// (Complete). Previously this ran decodeAudio() inline, so decoding large/long files
+// (e.g. several multi-minute music tracks at once → hundreds of MB of PCM) stalled
+// the game loop until every decode finished.
+struct DecodeWork {
+  napi_async_work work;
+  napi_deferred deferred;
+  // input (copied so it's safe to touch off the JS thread)
+  uint8_t* input;
+  size_t inputLen;
+  int targetRate;
+  // output (filled on the worker thread)
+  float* out;
+  size_t frames;
+  int channels;
+  int rate;
+};
+
+static void decode_execute(napi_env, void* data) {
+  DecodeWork* w = (DecodeWork*)data;
+  float* out = nullptr;
+  size_t totalSamples = 0;
+  int rate = 0;
+  int channels = decodeAudio(w->input, w->inputLen, &out, &totalSamples, &rate);
+  if (channels <= 0 || !out) { w->channels = -1; return; }
+  size_t frames = totalSamples / channels;
+
+  if (w->targetRate > 0 && rate != w->targetRate) {
+    size_t outFrames = 0;
+    float* res = resampleAudio(out, frames, channels, rate, w->targetRate, &outFrames);
+    if (res) { freeDecodedBuffer(out); out = res; frames = outFrames; rate = w->targetRate; }
+  }
+  w->out = out; w->frames = frames; w->channels = channels; w->rate = rate;
+}
+
+static void decode_complete(napi_env env, napi_status status, void* data) {
+  DecodeWork* w = (DecodeWork*)data;
+  if (status != napi_ok || w->channels <= 0 || !w->out) {
+    napi_value undef; napi_get_undefined(env, &undef);
+    // Resolve with undefined; the JS layer turns a null/undefined result into the
+    // 'unsupported or corrupt audio' error (keeps reject behavior consistent).
+    napi_resolve_deferred(env, w->deferred, undef);
+  } else {
+    napi_value result, ab, ta, v;
+    void* abData = nullptr;
+    size_t nbytes = w->frames * w->channels * sizeof(float);
+    napi_create_object(env, &result);
+    napi_create_arraybuffer(env, nbytes, &abData, &ab);
+    memcpy(abData, w->out, nbytes);
+    napi_create_typedarray(env, napi_float32_array, w->frames * w->channels, ab, 0, &ta);
+    napi_set_named_property(env, result, "data", ta);
+    napi_create_int32(env, w->channels, &v); napi_set_named_property(env, result, "channels", v);
+    napi_create_int32(env, (int)w->frames, &v); napi_set_named_property(env, result, "length", v);
+    napi_create_int32(env, w->rate, &v); napi_set_named_property(env, result, "sampleRate", v);
+    napi_resolve_deferred(env, w->deferred, result);
+  }
+  if (w->out) freeDecodedBuffer(w->out);
+  free(w->input);
+  napi_delete_async_work(env, w->work);
+  delete w;
+}
+
 FN(a_decode) {
   ARGS(2);
   size_t len = 0;
   uint8_t* bytes = (uint8_t*)argta(env, argv[0], &len);
   int targetRate = (int)N(1);
-  if (!bytes || len == 0) return nullptr;
 
-  float* out = nullptr;
-  size_t totalSamples = 0;
-  int rate = 0;
-  int channels = decodeAudio(bytes, len, &out, &totalSamples, &rate);
-  if (channels <= 0 || !out) return nullptr;
-  size_t frames = totalSamples / channels;
+  napi_value promise;
+  napi_deferred deferred;
+  napi_create_promise(env, &deferred, &promise);
 
-  if (targetRate > 0 && rate != targetRate) {
-    size_t outFrames = 0;
-    float* res = resampleAudio(out, frames, channels, rate, targetRate, &outFrames);
-    if (res) {
-      freeDecodedBuffer(out);
-      out = res;
-      frames = outFrames;
-      rate = targetRate;
-    }
+  if (!bytes || len == 0) {
+    napi_value undef; napi_get_undefined(env, &undef);
+    napi_resolve_deferred(env, deferred, undef);
+    return promise;
   }
 
-  napi_value result, ab, ta;
-  void* abData = nullptr;
-  size_t nbytes = frames * channels * sizeof(float);
-  napi_create_object(env, &result);
-  napi_create_arraybuffer(env, nbytes, &abData, &ab);
-  memcpy(abData, out, nbytes);
-  freeDecodedBuffer(out);
-  napi_create_typedarray(env, napi_float32_array, frames * channels, ab, 0, &ta);
-  napi_value v;
-  napi_set_named_property(env, result, "data", ta);
-  napi_create_int32(env, channels, &v);
-  napi_set_named_property(env, result, "channels", v);
-  napi_create_int32(env, (int)frames, &v);
-  napi_set_named_property(env, result, "length", v);
-  napi_create_int32(env, rate, &v);
-  napi_set_named_property(env, result, "sampleRate", v);
-  return result;
+  DecodeWork* w = new DecodeWork();
+  w->deferred = deferred;
+  w->inputLen = len;
+  w->input = (uint8_t*)malloc(len);
+  memcpy(w->input, bytes, len);  // copy NOW — the JS array may move/free after we return
+  w->targetRate = targetRate;
+  w->out = nullptr; w->frames = 0; w->channels = 0; w->rate = 0;
+
+  napi_value name;
+  napi_create_string_utf8(env, "jsgame:decodeAudio", NAPI_AUTO_LENGTH, &name);
+  napi_create_async_work(env, nullptr, name, decode_execute, decode_complete, w, &w->work);
+  napi_queue_async_work(env, w->work);
+  return promise;
 }
 
 extern "C" napi_value jsg_audio_register(napi_env env, napi_value exports) {

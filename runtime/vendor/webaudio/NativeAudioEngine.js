@@ -167,7 +167,9 @@ export const NativeAudioDecoders = {
       : ArrayBuffer.isView(audioData) ? new Uint8Array(audioData.buffer, audioData.byteOffset, audioData.byteLength)
       : null;
     if (!bytes) throw new Error('decodeAudioData: expected ArrayBuffer');
-    const decoded = native.decode(bytes, targetSampleRate || 0);
+    // native.decode now returns a Promise — the decode + resample run on libnode's
+    // libuv thread pool so this does NOT block the game loop (browser-accurate).
+    const decoded = await native.decode(bytes, targetSampleRate || 0);
     if (!decoded) throw new Error('decodeAudioData: unsupported or corrupt audio');
     return { audioData: decoded.data, channels: decoded.channels, length: decoded.length, sampleRate: decoded.sampleRate };
   },
