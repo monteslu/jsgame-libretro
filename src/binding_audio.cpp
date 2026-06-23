@@ -141,20 +141,31 @@ static void decode_execute(napi_env, void* data) {
   w->out = out; w->frames = frames; w->channels = channels; w->rate = rate;
 }
 
+// Finalizer for the external ArrayBuffer: frees the decoded PCM the buffer wraps,
+// run by V8 when the ArrayBuffer is GC'd. (matches freeDecodedBuffer == free())
+static void decode_buffer_finalize(node_api_basic_env, void* data, void*) {
+  freeDecodedBuffer((float*)data);
+}
+
 static void decode_complete(napi_env env, napi_status status, void* data) {
   DecodeWork* w = (DecodeWork*)data;
   if (status != napi_ok || w->channels <= 0 || !w->out) {
+    if (w->out) freeDecodedBuffer(w->out);  // error path: nothing wrapped it
     napi_value undef; napi_get_undefined(env, &undef);
     // Resolve with undefined; the JS layer turns a null/undefined result into the
     // 'unsupported or corrupt audio' error (keeps reject behavior consistent).
     napi_resolve_deferred(env, w->deferred, undef);
   } else {
+    // ZERO-COPY: wrap the worker's decoded PCM as an external ArrayBuffer instead
+    // of allocating a second buffer and memcpy'ing into it. For multi-minute music
+    // that copy was ~100MB+ on the JS thread per track (a startup/boss-fight stall
+    // source). The buffer is now owned by V8 and freed via the finalizer.
     napi_value result, ab, ta, v;
-    void* abData = nullptr;
     size_t nbytes = w->frames * w->channels * sizeof(float);
+    napi_create_external_arraybuffer(env, w->out, nbytes,
+                                     decode_buffer_finalize, nullptr, &ab);
+    w->out = nullptr;  // ownership transferred to the ArrayBuffer's finalizer
     napi_create_object(env, &result);
-    napi_create_arraybuffer(env, nbytes, &abData, &ab);
-    memcpy(abData, w->out, nbytes);
     napi_create_typedarray(env, napi_float32_array, w->frames * w->channels, ab, 0, &ta);
     napi_set_named_property(env, result, "data", ta);
     napi_create_int32(env, w->channels, &v); napi_set_named_property(env, result, "channels", v);
@@ -162,7 +173,6 @@ static void decode_complete(napi_env env, napi_status status, void* data) {
     napi_create_int32(env, w->rate, &v); napi_set_named_property(env, result, "sampleRate", v);
     napi_resolve_deferred(env, w->deferred, result);
   }
-  if (w->out) freeDecodedBuffer(w->out);
   free(w->input);
   napi_delete_async_work(env, w->work);
   delete w;
