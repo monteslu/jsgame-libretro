@@ -99,32 +99,42 @@ target_compile_definitions(opusfile_dec PRIVATE OP_FIXED_POINT=0 OP_ENABLE_HTTP=
 target_link_libraries(opusfile_dec PRIVATE opus ogg)
 
 # ─── AAC decode (Ittiam libxaac, Apache-2.0, maintained + fuzzed) ────────────
-# Build ONLY the decoder static lib (libxaacdec) via libxaac's own cmake includes
-# — NOT its top CMakeLists (that also pulls test/fuzzer/encoder, which we dropped).
-# utils.cmake has the per-arch helpers; common.cmake + libxaacdec.cmake define the
-# sources and the `libxaacdec` target. AAC-LC is patent-free (US patents expired
-# 2017).
+# AAC-LC is patent-free (US patents expired 2017). We build libxaac's decoder as a
+# PIC static lib from an EXPLICIT all-C source list (the 124 base decoder + 23 DRC +
+# 3 common + 2 generic files) — deliberately NOT via libxaac's own per-arch cmake.
+#
+# Why not its cmake: it selects hand-written GNU-as .s SIMD files keyed on
+# CMAKE_SYSTEM_PROCESSOR=="aarch64"/"x86_64", which breaks two ways here: (1) Apple
+# Silicon reports "arm64" not "aarch64" (misses the branch → undefined ARM symbols),
+# and (2) AppleClang's assembler rejects the GNU-as syntax ("brackets expression not
+# supported"). The portable, always-correct path is libxaac's own generic/ pure-C
+# implementation (function_selector_generic + qmf_dec_generic) with NO asm — same
+# approach we use for opus. Slightly slower than NEON/SSE, but decode is off the
+# game thread (async decodeAudioData) so it doesn't matter.
 set(XAAC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/libxaac")
-# On ARM (aarch64/aarch32) libxaacdec.cmake adds hand-written GNU-as .s files for
-# the SBR/QMF/FFT hot paths (e.g. ixheaacd_sbr_qmfsyn64_winadd.s) and #ifdef's out
-# their C versions — so the ASM language MUST be enabled or those symbols come up
-# undefined at link/load time. x86 uses C intrinsics (no .s), so this is a no-op
-# there.
-enable_language(ASM)
-# libxaac's cmake selects its arch sources by STREQUAL "aarch64". But Apple Silicon
-# macOS reports CMAKE_SYSTEM_PROCESSOR as "arm64", so it misses the aarch64 branch
-# and falls back to the x86 path → the ARM-only QMF/NEON functions
-# (ixheaacd_cplx_anal_qmffilt, ...) never compile → undefined symbols at link.
-# Normalize arm64→aarch64 for the duration of the libxaac includes, then restore.
-set(_JSG_SAVED_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
-if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-    set(CMAKE_SYSTEM_PROCESSOR "aarch64")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/libxaac_sources.txt" XAAC_SRC_REL)
+set(XAAC_SOURCES "")
+foreach(s ${XAAC_SRC_REL})
+    list(APPEND XAAC_SOURCES "${XAAC_ROOT}/${s}")
+endforeach()
+add_library(libxaacdec STATIC ${XAAC_SOURCES})
+set_target_properties(libxaacdec PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 99)
+target_include_directories(libxaacdec PRIVATE
+    "${XAAC_ROOT}/decoder" "${XAAC_ROOT}/decoder/drc_src" "${XAAC_ROOT}/common")
+# libxaac's generic function-selector wires up the function-pointer tables with
+# signatures that differ slightly between the scalar variants; the calls are
+# compatible at runtime but trip -Werror=incompatible-pointer-types (and MSVC's
+# equivalent). Relax it for this vendored third-party lib only.
+if(MSVC)
+    target_compile_options(libxaacdec PRIVATE /w)
+else()
+    # GCC 14+/Clang make incompatible-pointer-types an error by default; downgrade
+    # it (and a couple of other strict diagnostics the vendored C trips) to non-fatal
+    # for this third-party lib only.
+    target_compile_options(libxaacdec PRIVATE
+        -Wno-error=incompatible-pointer-types -Wno-incompatible-pointer-types
+        -Wno-error=implicit-function-declaration -Wno-implicit-function-declaration -w)
 endif()
-include("${XAAC_ROOT}/cmake/utils.cmake")
-include("${XAAC_ROOT}/common/common.cmake")
-include("${XAAC_ROOT}/decoder/libxaacdec.cmake")
-set(CMAKE_SYSTEM_PROCESSOR "${_JSG_SAVED_PROCESSOR}")
-set_target_properties(libxaacdec PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ─── Core ────────────────────────────────────────────────────────────────
 
