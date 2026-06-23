@@ -225,9 +225,16 @@ elseif(APPLE)
     if(NOT JSG_NAPI_OBJ)
         message(FATAL_ERROR "JSG_NAPI_OBJ not set (run via scripts/build.sh on macOS)")
     endif()
+    # force_load libxaacdec: its generic function-selector defines global function-
+    # pointer vars (ixheaacd_adjust_scale, _apply_rot, ...) referenced from other
+    # archive members. Apple's single-pass ld pulls members in reference order and
+    # was leaving the selector object out → "undefined symbols for arm64". Linux's
+    # --start-group handles this, so this is macOS-only. (x86 macOS happened to pull
+    # the right order; arm64 didn't — force_load makes it deterministic on both.)
     target_link_libraries(jsgame_libretro PRIVATE
         ${LIBNODE_DIR}/libnode.a pthread dl m c++
         "-Wl,-force_load,${JSG_NAPI_OBJ}"
+        "-Wl,-force_load,$<TARGET_FILE:libxaacdec>"
         ${LIBCANVAS_A}
         "-framework CoreFoundation" "-framework Security"
         "-framework SystemConfiguration" "-framework ApplicationServices")
