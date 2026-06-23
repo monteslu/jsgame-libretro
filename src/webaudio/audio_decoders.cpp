@@ -26,17 +26,26 @@ extern "C" {
 #define EXPORT
 #include "../vendor/resample.c"
 
-// AAC: not supported. The old uaac decoder was x86-only inline asm (broke on
-// ARM/MSVC) so it was compiled out on every platform — dead weight, now removed
-// (along with src/vendor/uaac.h). AAC-LC is patent-free (US patents expired 2017),
-// so a future AAC decoder is legally fine; the right library is Ittiam libxaac
-// (Apache-2.0, actively maintained + fuzzed) — fdk-aac-free is abandonware with
-// unpatched security bugs and faad2 is GPL. For now WAV/MP3/FLAC/Vorbis/Opus cover
-// game audio and match Chrome's set (Chromium itself also ships no AAC).
+// AAC (AAC-LC / HE-AAC): Ittiam libxaac (ixheaacd), Apache-2.0, actively
+// maintained + fuzzed. AAC-LC is patent-free (US patents expired 2017). Replaces
+// the old uaac decoder (x86-only inline asm → was disabled on every platform).
+// libxaac ships no public header declaring its entry point, so we forward-declare
+// ixheaacd_dec_api exactly as its reference test app does.
+extern "C" {
+#include "../vendor/libxaac/decoder/ixheaacd_type_def.h"
+#include "../vendor/libxaac/decoder/ixheaacd_error_standards.h"
+#include "../vendor/libxaac/decoder/ixheaacd_apicmd_standards.h"
+#include "../vendor/libxaac/decoder/ixheaacd_memory_standards.h"
+#include "../vendor/libxaac/decoder/ixheaacd_aac_config.h"
+#include "../vendor/libxaac/decoder/ixheaacd_error_codes.h"  // INSUFFICIENT_INPUT_BYTES
+IA_ERRORCODE ixheaacd_dec_api(pVOID p_ia_xheaac_dec_obj, WORD32 i_cmd,
+                              WORD32 i_idx, pVOID pv_value);
+}
 
 #include <emscripten.h>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <vector>
 
 extern "C" {
@@ -262,6 +271,233 @@ int decodeOpus(const uint8_t* input, size_t inputSize, float** output, size_t* t
     return channels;
 }
 
+// Decode AAC (ADTS/raw) from a memory buffer to interleaved float samples,
+// via Ittiam libxaac. Modeled on libxaac's reference decode flow (test app
+// ia_main_process), stripped to a memory-only, DRC-free path. Returns channel
+// count (1, 2, ...), or -1 on error.
+//
+// OUTPUT NOTE: libxaac has no float output mode (PCM_WDSZ accepts only 16/24 and
+// ixheaacd_samples_sat writes native-endian WORD16 for 16-bit). So we decode to
+// 16-bit PCM and convert each sample to float (s / 32768.0f).
+EMSCRIPTEN_KEEPALIVE
+int decodeAAC(const uint8_t* input, size_t inputSize, float** output,
+              size_t* totalSamples, int* sampleRate) {
+    *output = NULL;
+    *totalSamples = 0;
+    *sampleRate = 0;
+    if (input == NULL || inputSize == 0) return -1;
+
+    // Every malloc goes here; all freed at cleanup: on every exit path.
+    void* alloc_list[100];
+    int alloc_count = 0;
+
+    int ret = -1;
+    IA_ERRORCODE err = IA_NO_ERROR;
+    pVOID p_api = NULL;
+    pWORD8 pb_inp_buf = NULL;
+    pWORD8 pb_out_buf = NULL;
+    UWORD32 ui_inp_size = 0;
+
+    WORD16* pcm = NULL;
+    size_t pcm_count = 0, pcm_cap = 0;
+
+    UWORD32 ui_api_size = 0;
+    WORD32 n_mems = 0, i;
+
+    // 1) API size + aligned API object.
+    err = ixheaacd_dec_api(NULL, IA_API_CMD_GET_API_SIZE, 0, &ui_api_size);
+    if (err & IA_FATAL_ERROR) goto cleanup;
+    {
+        void* raw = malloc((size_t)ui_api_size + 4);
+        if (!raw) goto cleanup;
+        alloc_list[alloc_count++] = raw;
+        SIZE_T rem = ((SIZE_T)raw & 3);
+        p_api = (pVOID)((WORD8*)raw + 4 - rem);
+    }
+
+    // 2) INIT pre-config, then force 16-bit PCM out.
+    err = ixheaacd_dec_api(p_api, IA_API_CMD_INIT, IA_CMD_TYPE_INIT_API_PRE_CONFIG_PARAMS, NULL);
+    if (err & IA_FATAL_ERROR) goto cleanup;
+    {
+        UWORD32 pcm_wdsz = 16;
+        err = ixheaacd_dec_api(p_api, IA_API_CMD_SET_CONFIG_PARAM,
+                               IA_XHEAAC_DEC_CONFIG_PARAM_PCM_WDSZ, &pcm_wdsz);
+        if (err & IA_FATAL_ERROR) goto cleanup;
+    }
+
+    // 3) memtabs-ptr block.
+    {
+        UWORD32 ui_memtabs_size = 0;
+        err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_MEMTABS_SIZE, 0, &ui_memtabs_size);
+        if (err & IA_FATAL_ERROR) goto cleanup;
+        void* raw = malloc((size_t)ui_memtabs_size + 4);
+        if (!raw) goto cleanup;
+        alloc_list[alloc_count++] = raw;
+        SIZE_T rem = ((SIZE_T)raw & 3);
+        err = ixheaacd_dec_api(p_api, IA_API_CMD_SET_MEMTABS_PTR, 0,
+                               (pVOID)((WORD8*)raw + 4 - rem));
+        if (err & IA_FATAL_ERROR) goto cleanup;
+    }
+
+    // 4) INIT post-config (library fills memory-info tables).
+    err = ixheaacd_dec_api(p_api, IA_API_CMD_INIT, IA_CMD_TYPE_INIT_API_POST_CONFIG_PARAMS, NULL);
+    if (err & IA_FATAL_ERROR) goto cleanup;
+
+    // 5) allocate each memtab; capture INPUT/OUTPUT buffers.
+    err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_N_MEMTABS, 0, &n_mems);
+    if (err & IA_FATAL_ERROR) goto cleanup;
+    for (i = 0; i < n_mems; i++) {
+        WORD32 ui_size = 0, ui_alignment = 0, ui_type = 0;
+        err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_MEM_INFO_SIZE, i, &ui_size);
+        if (err & IA_FATAL_ERROR) goto cleanup;
+        err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_MEM_INFO_ALIGNMENT, i, &ui_alignment);
+        if (err & IA_FATAL_ERROR) goto cleanup;
+        err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_MEM_INFO_TYPE, i, &ui_type);
+        if (err & IA_FATAL_ERROR) goto cleanup;
+        if (ui_alignment <= 0) ui_alignment = 1;
+        void* raw = malloc((size_t)ui_size + (size_t)ui_alignment);
+        if (!raw) goto cleanup;
+        alloc_list[alloc_count++] = raw;
+        SIZE_T rem = ((SIZE_T)raw % (SIZE_T)ui_alignment);
+        pVOID aligned = (pVOID)((WORD8*)raw + ui_alignment - rem);
+        err = ixheaacd_dec_api(p_api, IA_API_CMD_SET_MEM_PTR, i, aligned);
+        if (err & IA_FATAL_ERROR) goto cleanup;
+        if (ui_type == IA_MEMTYPE_INPUT) { pb_inp_buf = (pWORD8)aligned; ui_inp_size = (UWORD32)ui_size; }
+        else if (ui_type == IA_MEMTYPE_OUTPUT) { pb_out_buf = (pWORD8)aligned; }
+    }
+    if (pb_inp_buf == NULL || pb_out_buf == NULL || ui_inp_size == 0) goto cleanup;
+
+    {
+        size_t in_off = 0;
+        bool input_over_sent = false;
+
+        // 6) init-process loop (handles junk before the first valid frame).
+        {
+            WORD32 init_done = 0, last_err = 0;
+            do {
+                WORD32 bytes_avail = 0;
+                if (in_off < inputSize) {
+                    size_t remaining = inputSize - in_off;
+                    size_t chunk = remaining < (size_t)ui_inp_size ? remaining : (size_t)ui_inp_size;
+                    memcpy(pb_inp_buf, input + in_off, chunk);
+                    bytes_avail = (WORD32)chunk;
+                }
+                if (bytes_avail <= 0 ||
+                    (last_err == (WORD32)IA_XHEAAC_DEC_EXE_NONFATAL_INSUFFICIENT_INPUT_BYTES && in_off >= inputSize)) {
+                    if (!input_over_sent) {
+                        err = ixheaacd_dec_api(p_api, IA_API_CMD_INPUT_OVER, 0, NULL);
+                        input_over_sent = true;
+                        if (err & IA_FATAL_ERROR) goto cleanup;
+                    }
+                    goto cleanup;  // ran out before init completed
+                }
+                err = ixheaacd_dec_api(p_api, IA_API_CMD_SET_INPUT_BYTES, 0, &bytes_avail);
+                if (err & IA_FATAL_ERROR) goto cleanup;
+                err = ixheaacd_dec_api(p_api, IA_API_CMD_INIT, IA_CMD_TYPE_INIT_PROCESS, NULL);
+                last_err = err;
+                if (err & IA_FATAL_ERROR) goto cleanup;
+                err = ixheaacd_dec_api(p_api, IA_API_CMD_INIT, IA_CMD_TYPE_INIT_DONE_QUERY, &init_done);
+                if (err & IA_FATAL_ERROR) goto cleanup;
+                {
+                    WORD32 consumed = 0;
+                    err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_CURIDX_INPUT_BUF, 0, &consumed);
+                    if (err & IA_FATAL_ERROR) goto cleanup;
+                    if (consumed < 0) consumed = 0;
+                    if ((size_t)consumed > (size_t)bytes_avail) consumed = bytes_avail;
+                    in_off += (size_t)consumed;
+                }
+            } while (!init_done);
+        }
+
+        // 7) read decoded config.
+        {
+            WORD32 samp_freq = 0, num_chan = 0;
+            err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_CONFIG_PARAM, IA_XHEAAC_DEC_CONFIG_PARAM_SAMP_FREQ, &samp_freq);
+            if (err & IA_FATAL_ERROR) goto cleanup;
+            err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_CONFIG_PARAM, IA_XHEAAC_DEC_CONFIG_PARAM_NUM_CHANNELS, &num_chan);
+            if (err & IA_FATAL_ERROR) goto cleanup;
+            if (num_chan < 1 || samp_freq <= 0) goto cleanup;
+            *sampleRate = (int)samp_freq;
+            ret = (int)num_chan;
+        }
+
+        // 8) steady-state execute loop.
+        {
+            WORD32 exec_done = 0, last_err = 0;
+            do {
+                WORD32 bytes_avail = 0;
+                if (in_off < inputSize) {
+                    size_t remaining = inputSize - in_off;
+                    size_t chunk = remaining < (size_t)ui_inp_size ? remaining : (size_t)ui_inp_size;
+                    memcpy(pb_inp_buf, input + in_off, chunk);
+                    bytes_avail = (WORD32)chunk;
+                }
+                if (bytes_avail <= 0 ||
+                    (last_err == (WORD32)IA_XHEAAC_DEC_EXE_NONFATAL_INSUFFICIENT_INPUT_BYTES && in_off >= inputSize)) {
+                    if (!input_over_sent) {
+                        err = ixheaacd_dec_api(p_api, IA_API_CMD_INPUT_OVER, 0, NULL);
+                        input_over_sent = true;
+                        if (err & IA_FATAL_ERROR) goto cleanup;
+                    }
+                }
+                err = ixheaacd_dec_api(p_api, IA_API_CMD_SET_INPUT_BYTES, 0, &bytes_avail);
+                if (err & IA_FATAL_ERROR) goto cleanup;
+                err = ixheaacd_dec_api(p_api, IA_API_CMD_EXECUTE, IA_CMD_TYPE_DO_EXECUTE, NULL);
+                last_err = err;
+                if (err & IA_FATAL_ERROR) goto cleanup;
+                err = ixheaacd_dec_api(p_api, IA_API_CMD_EXECUTE, IA_CMD_TYPE_DONE_QUERY, &exec_done);
+                if (err & IA_FATAL_ERROR) goto cleanup;
+                {
+                    WORD32 consumed = 0;
+                    err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_CURIDX_INPUT_BUF, 0, &consumed);
+                    if (err & IA_FATAL_ERROR) goto cleanup;
+                    if (consumed < 0) consumed = 0;
+                    if ((size_t)consumed > (size_t)bytes_avail) consumed = bytes_avail;
+                    in_off += (size_t)consumed;
+                }
+                {
+                    WORD32 out_bytes = 0;
+                    err = ixheaacd_dec_api(p_api, IA_API_CMD_GET_OUTPUT_BYTES, 0, &out_bytes);
+                    if (err & IA_FATAL_ERROR) goto cleanup;
+                    if (out_bytes > 0) {
+                        size_t n_samp = (size_t)out_bytes / sizeof(WORD16);
+                        if (pcm_count + n_samp > pcm_cap) {
+                            size_t new_cap = (pcm_cap == 0) ? (n_samp + 4096) : (pcm_cap * 2);
+                            if (new_cap < pcm_count + n_samp) new_cap = pcm_count + n_samp;
+                            WORD16* grown = (WORD16*)realloc(pcm, new_cap * sizeof(WORD16));
+                            if (!grown) goto cleanup;
+                            pcm = grown; pcm_cap = new_cap;
+                        }
+                        memcpy(pcm + pcm_count, pb_out_buf, (size_t)out_bytes);
+                        pcm_count += n_samp;
+                    }
+                }
+                if (input_over_sent && exec_done == 0) {
+                    WORD32 ob = 0;
+                    ixheaacd_dec_api(p_api, IA_API_CMD_GET_OUTPUT_BYTES, 0, &ob);
+                    if (ob <= 0) break;
+                }
+            } while (!exec_done);
+        }
+    }
+
+    // 9) convert 16-bit PCM -> float.
+    if (pcm_count == 0) { ret = -1; goto cleanup; }
+    {
+        float* out = (float*)malloc(pcm_count * sizeof(float));
+        if (!out) { ret = -1; goto cleanup; }
+        for (size_t k = 0; k < pcm_count; k++) out[k] = (float)pcm[k] / 32768.0f;
+        *output = out;
+        *totalSamples = pcm_count;
+    }
+
+cleanup:
+    if (pcm) free(pcm);
+    for (int j = 0; j < alloc_count; j++) free(alloc_list[j]);
+    if (ret < 0) { *output = NULL; *totalSamples = 0; }
+    return ret;
+}
+
 // Resample audio using Speex resampler (high quality, SIMD-optimized)
 // Returns: resampled buffer (caller must free), or NULL on error
 // Output format: interleaved float32 samples at target sample rate
@@ -350,20 +586,25 @@ int decodeAudio(const uint8_t* input, size_t inputSize, float** output, size_t* 
         return -1; // Not enough data to detect format
     }
 
-    // Check magic bytes to determine format
-    // Note: MP3 must be checked before AAC since both use 0xFF 0xFx sync patterns
-    // MP3's 0xFF 0xEx is more specific than AAC's 0xFF 0xFx
+    // Check magic bytes to determine format.
+    //
+    // ADTS-AAC vs MP3 BOTH start with 0xFF and an 0xEx/0xFx second byte, so order
+    // and bit-precision matter. The MPEG frame header layout of byte[1] is:
+    //   1111 1xxx (sync) | mpeg-version-bit | LL (layer, 2 bits) | protection-bit
+    // For ADTS the LAYER field (bits 2-1, mask 0x06) is always 00; for MP3 it is
+    // 01/10/11 (never 00). So check ADTS FIRST (syncword 0xFFFx AND layer==00),
+    // and only then MP3 — otherwise an ADTS stream (e.g. 0xFFF1) matches the MP3
+    // 0xFF 0xEx test and gets mis-routed to the MP3 decoder.
 
-    // MP3: starts with 0xFF 0xEx or ID3 tag
+    // AAC (ADTS): 0xFFFx with the layer field == 00. Decode via libxaac.
+    if (input[0] == 0xFF && (input[1] & 0xF0) == 0xF0 && (input[1] & 0x06) == 0x00) {
+        return decodeAAC(input, inputSize, output, totalSamples, sampleRate);
+    }
+
+    // MP3: 0xFF 0xEx/0xFx frame sync (layer != 00), or an ID3 tag.
     if ((input[0] == 0xFF && (input[1] & 0xE0) == 0xE0) ||
         (input[0] == 0x49 && input[1] == 0x44 && input[2] == 0x33)) {
         return decodeMP3(input, inputSize, output, totalSamples, sampleRate);
-    }
-
-    // AAC (ADTS sync 0xFF 0xFx, after MP3): not supported (no decoder — see note
-    // at top; libxaac is the future path). Falls through to "unsupported".
-    if (input[0] == 0xFF && (input[1] & 0xF0) == 0xF0) {
-        return -1;
     }
 
     // WAV: starts with "RIFF"

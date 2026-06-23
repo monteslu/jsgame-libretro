@@ -98,6 +98,18 @@ target_include_directories(opusfile_dec PRIVATE
 target_compile_definitions(opusfile_dec PRIVATE OP_FIXED_POINT=0 OP_ENABLE_HTTP=0)
 target_link_libraries(opusfile_dec PRIVATE opus ogg)
 
+# ─── AAC decode (Ittiam libxaac, Apache-2.0, maintained + fuzzed) ────────────
+# Build ONLY the decoder static lib (libxaacdec) via libxaac's own cmake includes
+# — NOT its top CMakeLists (that also pulls test/fuzzer/encoder, which we dropped).
+# utils.cmake has the per-arch helpers; common.cmake + libxaacdec.cmake define the
+# sources and the `libxaacdec` target. AAC-LC is patent-free (US patents expired
+# 2017).
+set(XAAC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/libxaac")
+include("${XAAC_ROOT}/cmake/utils.cmake")
+include("${XAAC_ROOT}/common/common.cmake")
+include("${XAAC_ROOT}/decoder/libxaacdec.cmake")
+set_target_properties(libxaacdec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # ─── Core ────────────────────────────────────────────────────────────────
 
 file(GLOB WEBAUDIO_SRC src/webaudio/*.cpp src/webaudio/nodes/*.cpp src/webaudio/utils/*.cpp)
@@ -239,13 +251,13 @@ else()
     )
 endif()
 
-# ── Opus decode libs (all platforms) ────────────────────────────────────
-# opusfile_dec → opus + ogg (transitively). A separate link line so it applies
-# regardless of the per-platform block above; CMake orders the static-lib deps.
-target_link_libraries(jsgame_libretro PRIVATE opusfile_dec opus ogg)
-# audio_decoders.cpp includes opusfile.h (+ opus/ogg headers it pulls in).
+# ── Audio decode libs (Opus + AAC, all platforms) ───────────────────────
+# Separate link line so it applies regardless of the per-platform block above;
+# CMake orders the static-lib deps. opusfile_dec → opus + ogg (transitively).
+target_link_libraries(jsgame_libretro PRIVATE opusfile_dec opus ogg libxaacdec)
+# audio_decoders.cpp includes opusfile.h + the libxaac decoder headers.
 set_source_files_properties(src/webaudio/audio_decoders.cpp PROPERTIES
-    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/emshim;${CMAKE_CURRENT_SOURCE_DIR}/deps/simde;${CMAKE_CURRENT_SOURCE_DIR}/src;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/opusfile/include;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/opus/include;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/ogg/include")
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/emshim;${CMAKE_CURRENT_SOURCE_DIR}/deps/simde;${CMAKE_CURRENT_SOURCE_DIR}/src;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/opusfile/include;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/opus/include;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/ogg/include;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/libxaac/decoder")
 
 # ── GLES3 headers for the WebGL2 binding ─────────────────────────────────
 # The binding links NO GL library. Every GL entry point is loaded at runtime from
