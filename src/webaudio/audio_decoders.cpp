@@ -12,6 +12,13 @@
 
 #include "../vendor/stb_vorbis.c"
 
+// Opus (Ogg-Opus): libopus + libogg + opusfile (all BSD, royalty-free patents).
+// opusfile is a real library (compiled separately + linked), not single-header, so
+// we only include its API here. It always decodes to 48 kHz interleaved float.
+extern "C" {
+#include "../vendor/opusfile/include/opusfile.h"
+}
+
 // Speex resampler (BSD license)
 #define OUTSIDE_SPEEX
 #define RANDOM_PREFIX webaudio
@@ -215,6 +222,51 @@ int decodeVorbis(const uint8_t* input, size_t inputSize, float** output, size_t*
         return -1;
     }
 
+    return channels;
+}
+
+// Decode an Ogg-Opus stream to interleaved float. opusfile always outputs 48 kHz
+// (Opus is internally always 48 kHz), so sampleRate is 48000 and no resample is
+// needed for our 48 kHz context. Returns channel count, or -1 on error.
+EMSCRIPTEN_KEEPALIVE
+int decodeOpus(const uint8_t* input, size_t inputSize, float** output, size_t* totalSamples, int* sampleRate) {
+    int err = 0;
+    OggOpusFile* of = op_open_memory(input, inputSize, &err);
+    if (!of || err != 0) { if (of) op_free(of); return -1; }
+
+    int channels = op_channel_count(of, -1);   // -1 = whole stream (first link)
+    if (channels < 1 || channels > 8) { op_free(of); return -1; }
+    *sampleRate = 48000;  // opusfile always decodes to 48 kHz
+
+    // op_read_float returns samples-per-channel per call; total length may be known
+    // (seekable) but isn't guaranteed, so grow the buffer as we decode.
+    ogg_int64_t hint = op_pcm_total(of, -1);    // total frames, or negative if unknown
+    size_t cap = (hint > 0 ? (size_t)hint : 48000) * channels;  // start at hint, or ~1s
+    float* out = (float*)malloc(cap * sizeof(float));
+    if (!out) { op_free(of); return -1; }
+
+    size_t filled = 0;            // total floats written
+    const int CHUNK = 5760;       // frames per read (120ms @48k, opusfile-recommended)
+    for (;;) {
+        // ensure room for one more chunk (CHUNK frames * channels floats)
+        size_t need = filled + (size_t)CHUNK * channels;
+        if (need > cap) {
+            cap = need * 2;
+            float* grown = (float*)realloc(out, cap * sizeof(float));
+            if (!grown) { free(out); op_free(of); return -1; }
+            out = grown;
+        }
+        int n = op_read_float(of, out + filled, (int)((cap - filled)), NULL);
+        if (n < 0) { free(out); op_free(of); return -1; }  // decode error
+        if (n == 0) break;                                  // end of stream
+        filled += (size_t)n * channels;
+    }
+    op_free(of);
+
+    // Shrink to the actual size (best effort).
+    float* fit = (float*)realloc(out, filled * sizeof(float));
+    *output = fit ? fit : out;
+    *totalSamples = filled;
     return channels;
 }
 
@@ -429,9 +481,18 @@ int decodeAudio(const uint8_t* input, size_t inputSize, float** output, size_t* 
         return decodeFLAC(input, inputSize, output, totalSamples, sampleRate);
     }
 
-    // OGG: starts with "OggS"
+    // OGG container ("OggS") — holds either Vorbis or Opus. The codec id lives in
+    // the first page's body: "OpusHead" for Opus, "\x01vorbis" for Vorbis. Scan the
+    // first page (its segment table starts at byte 27) for the marker.
     if (input[0] == 0x4F && input[1] == 0x67 &&
         input[2] == 0x67 && input[3] == 0x53) {
+        // Look for "OpusHead" within the first ~512 bytes (first page header+body).
+        size_t scan = inputSize < 512 ? inputSize : 512;
+        for (size_t i = 0; i + 8 <= scan; i++) {
+            if (memcmp(input + i, "OpusHead", 8) == 0) {
+                return decodeOpus(input, inputSize, output, totalSamples, sampleRate);
+            }
+        }
         return decodeVorbis(input, inputSize, output, totalSamples, sampleRate);
     }
 

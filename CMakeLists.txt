@@ -63,6 +63,41 @@ set_source_files_properties("${EMBEDDED_RUNTIME_C}" PROPERTIES GENERATED TRUE)
 # Explicit anchor so multi-config generators (Xcode/VS) order codegen first.
 add_custom_target(jsg_runtime_blob DEPENDS "${EMBEDDED_RUNTIME_C}")
 
+# ─── Opus decode (libogg + libopus + opusfile, all BSD, royalty-free) ────────
+# Built as static libs via the upstream CMake (handles arch/intrinsics detection
+# per platform). We only need DECODE: tests/programs/docs/install all stay off, and
+# opusfile is compiled from its 4 memory-decode .c files (no http.c/wincerts.c).
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+set(INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(INSTALL_CMAKE_PACKAGE_MODULE OFF CACHE BOOL "" FORCE)
+# These static libs link into our SHARED core, so they need PIC.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_subdirectory(src/vendor/ogg EXCLUDE_FROM_ALL)
+add_subdirectory(src/vendor/opus EXCLUDE_FROM_ALL)
+set_target_properties(ogg opus PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_library(opusfile_dec STATIC
+    src/vendor/opusfile/src/opusfile.c
+    src/vendor/opusfile/src/stream.c
+    src/vendor/opusfile/src/info.c
+    src/vendor/opusfile/src/internal.c
+)
+set_target_properties(opusfile_dec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(opusfile_dec PRIVATE
+    src/vendor/opusfile/include
+    src/vendor/opusfile/src
+    src/vendor/ogg/include
+    src/vendor/opus/include)
+# Memory-only decode: no HTTP/URL stack, no float-config quirks (opusfile defaults
+# to float output, matching our 48 kHz float pipeline).
+target_compile_definitions(opusfile_dec PRIVATE OP_FIXED_POINT=0 OP_ENABLE_HTTP=0)
+target_link_libraries(opusfile_dec PRIVATE opus ogg)
+
 # ─── Core ────────────────────────────────────────────────────────────────
 
 file(GLOB WEBAUDIO_SRC src/webaudio/*.cpp src/webaudio/nodes/*.cpp src/webaudio/utils/*.cpp)
@@ -207,6 +242,14 @@ else()
         -Wl,--wrap=log10f -Wl,--wrap=remainder
     )
 endif()
+
+# ── Opus decode libs (all platforms) ────────────────────────────────────
+# opusfile_dec → opus + ogg (transitively). A separate link line so it applies
+# regardless of the per-platform block above; CMake orders the static-lib deps.
+target_link_libraries(jsgame_libretro PRIVATE opusfile_dec opus ogg)
+# audio_decoders.cpp includes opusfile.h (+ opus/ogg headers it pulls in).
+set_source_files_properties(src/webaudio/audio_decoders.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/emshim;${CMAKE_CURRENT_SOURCE_DIR}/deps/simde;${CMAKE_CURRENT_SOURCE_DIR}/src;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/opusfile/include;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/opus/include;${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/ogg/include")
 
 # ── GLES3 headers for the WebGL2 binding ─────────────────────────────────
 # The binding links NO GL library. Every GL entry point is loaded at runtime from
