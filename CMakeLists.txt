@@ -105,6 +105,12 @@ target_link_libraries(opusfile_dec PRIVATE opus ogg)
 # sources and the `libxaacdec` target. AAC-LC is patent-free (US patents expired
 # 2017).
 set(XAAC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/libxaac")
+# On ARM (aarch64/aarch32) libxaacdec.cmake adds hand-written GNU-as .s files for
+# the SBR/QMF/FFT hot paths (e.g. ixheaacd_sbr_qmfsyn64_winadd.s) and #ifdef's out
+# their C versions — so the ASM language MUST be enabled or those symbols come up
+# undefined at link/load time. x86 uses C intrinsics (no .s), so this is a no-op
+# there.
+enable_language(ASM)
 include("${XAAC_ROOT}/cmake/utils.cmake")
 include("${XAAC_ROOT}/common/common.cmake")
 include("${XAAC_ROOT}/decoder/libxaacdec.cmake")
