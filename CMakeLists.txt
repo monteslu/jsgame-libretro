@@ -125,10 +125,6 @@ add_dependencies(jsgame_libretro jsg_runtime_blob)
 # libnode's bundled-zlib dup-symbol pile; NO_ARCHIVE_WRITING_APIS — we read only.
 set_source_files_properties(src/vendor/miniz.c PROPERTIES
     COMPILE_DEFINITIONS "MINIZ_NO_ZLIB_APIS;MINIZ_NO_ARCHIVE_WRITING_APIS")
-# vendored decoder headers (uaac AAC tables) trip gcc's C++ narrowing errors
-if(NOT MSVC)
-    set_source_files_properties(src/webaudio/audio_decoders.cpp PROPERTIES COMPILE_OPTIONS "-Wno-narrowing")
-endif()
 # webaudio engine sources include <emscripten.h> for EMSCRIPTEN_KEEPALIVE only
 set_source_files_properties(${WEBAUDIO_SRC} src/binding_audio.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/emshim;${CMAKE_CURRENT_SOURCE_DIR}/deps/simde;${CMAKE_CURRENT_SOURCE_DIR}/src")

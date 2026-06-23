@@ -26,21 +26,13 @@ extern "C" {
 #define EXPORT
 #include "../vendor/resample.c"
 
-// uaac.h's MP4 parsing wants POSIX read/lseek (unused - we decode raw AAC).
-// jsgame fix: the old global stubs SHADOWED libc read/lseek for the whole .so
-// (libnode read empty files through them). Scope the stubs to uaac only.
-// jsgame: uaac.h has x86-only inline assembly ("Unsupported platform in
-// assembly.h" on ARM/MSVC). AAC is the least-needed codec for games
-// (MP3/OGG/WAV/FLAC cover it); gate it off by default.
-#ifdef JSG_ENABLE_AAC
-static ssize_t uaac_stub_read(int, void*, size_t) { return -1; }
-static off_t uaac_stub_lseek(int, off_t, int) { return -1; }
-#define read uaac_stub_read
-#define lseek uaac_stub_lseek
-#include "../vendor/uaac.h"
-#undef read
-#undef lseek
-#endif
+// AAC: not supported. The old uaac decoder was x86-only inline asm (broke on
+// ARM/MSVC) so it was compiled out on every platform — dead weight, now removed
+// (along with src/vendor/uaac.h). AAC-LC is patent-free (US patents expired 2017),
+// so a future AAC decoder is legally fine; the right library is Ittiam libxaac
+// (Apache-2.0, actively maintained + fuzzed) — fdk-aac-free is abandonware with
+// unpatched security bugs and faad2 is GPL. For now WAV/MP3/FLAC/Vorbis/Opus cover
+// game audio and match Chrome's set (Chromium itself also ships no AAC).
 
 #include <emscripten.h>
 #include <cstdlib>
@@ -270,98 +262,6 @@ int decodeOpus(const uint8_t* input, size_t inputSize, float** output, size_t* t
     return channels;
 }
 
-#ifdef JSG_ENABLE_AAC
-// Decode AAC file to interleaved float samples
-// Returns: number of channels, or -1 on error
-// Output format: interleaved float32 samples [L, R, L, R, ...]
-EMSCRIPTEN_KEEPALIVE
-int decodeAAC(const uint8_t* input, size_t inputSize, float** output, size_t* totalSamples, int* sampleRate) {
-    HAACDecoder decoder = AACInitDecoder();
-    if (!decoder) {
-        return -1;
-    }
-
-    // Make a mutable copy of input data
-    uint8_t* inputCopy = (uint8_t*)malloc(inputSize);
-    if (!inputCopy) {
-        AACFreeDecoder(decoder);
-        return -1;
-    }
-    memcpy(inputCopy, input, inputSize);
-
-    uint8_t* inputPtr = inputCopy;
-    int bytesLeft = inputSize;
-
-    // Temporary buffer for PCM output (max AAC frame is 2048 samples * 2 channels)
-    const int maxFrameSize = 2048 * 2;
-    short* pcmBuffer = (short*)malloc(maxFrameSize * sizeof(short));
-    if (!pcmBuffer) {
-        free(inputCopy);
-        AACFreeDecoder(decoder);
-        return -1;
-    }
-
-    // Collect all decoded frames
-    std::vector<short> allSamples;
-    AACFrameInfo frameInfo;
-    int channels = 0;
-    int sampRate = 0;
-
-    while (bytesLeft > 0) {
-        int offset = AACFindSyncWord(inputPtr, bytesLeft);
-        if (offset < 0) {
-            break; // No more sync words
-        }
-
-        inputPtr += offset;
-        bytesLeft -= offset;
-
-        int err = AACDecode(decoder, &inputPtr, &bytesLeft, pcmBuffer);
-        if (err != 0) {
-            // Decode error, try to continue
-            inputPtr++;
-            bytesLeft--;
-            continue;
-        }
-
-        AACGetLastFrameInfo(decoder, &frameInfo);
-
-        if (channels == 0) {
-            channels = frameInfo.nChans;
-            sampRate = frameInfo.sampRateOut;
-        }
-
-        // Add decoded samples to vector
-        int frameSamples = frameInfo.outputSamps;
-        for (int i = 0; i < frameSamples; i++) {
-            allSamples.push_back(pcmBuffer[i]);
-        }
-    }
-
-    free(pcmBuffer);
-    free(inputCopy);
-    AACFreeDecoder(decoder);
-
-    if (allSamples.empty() || channels == 0) {
-        return -1;
-    }
-
-    // Convert int16 to float32
-    *totalSamples = allSamples.size();
-    *sampleRate = sampRate;
-    *output = (float*)malloc(*totalSamples * sizeof(float));
-    if (!*output) {
-        return -1;
-    }
-
-    for (size_t i = 0; i < *totalSamples; i++) {
-        (*output)[i] = allSamples[i] / 32768.0f;
-    }
-
-    return channels;
-}
-#endif  // JSG_ENABLE_AAC
-
 // Resample audio using Speex resampler (high quality, SIMD-optimized)
 // Returns: resampled buffer (caller must free), or NULL on error
 // Output format: interleaved float32 samples at target sample rate
@@ -460,13 +360,10 @@ int decodeAudio(const uint8_t* input, size_t inputSize, float** output, size_t* 
         return decodeMP3(input, inputSize, output, totalSamples, sampleRate);
     }
 
-    // AAC: starts with 0xFF 0xFx (ADTS sync word) - checked after MP3
+    // AAC (ADTS sync 0xFF 0xFx, after MP3): not supported (no decoder — see note
+    // at top; libxaac is the future path). Falls through to "unsupported".
     if (input[0] == 0xFF && (input[1] & 0xF0) == 0xF0) {
-#ifdef JSG_ENABLE_AAC
-        return decodeAAC(input, inputSize, output, totalSamples, sampleRate);
-#else
-        return -1;  // AAC disabled (uaac is x86-only)
-#endif
+        return -1;
     }
 
     // WAV: starts with "RIFF"
