@@ -111,9 +111,19 @@ set(XAAC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/libxaac")
 # undefined at link/load time. x86 uses C intrinsics (no .s), so this is a no-op
 # there.
 enable_language(ASM)
+# libxaac's cmake selects its arch sources by STREQUAL "aarch64". But Apple Silicon
+# macOS reports CMAKE_SYSTEM_PROCESSOR as "arm64", so it misses the aarch64 branch
+# and falls back to the x86 path → the ARM-only QMF/NEON functions
+# (ixheaacd_cplx_anal_qmffilt, ...) never compile → undefined symbols at link.
+# Normalize arm64→aarch64 for the duration of the libxaac includes, then restore.
+set(_JSG_SAVED_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    set(CMAKE_SYSTEM_PROCESSOR "aarch64")
+endif()
 include("${XAAC_ROOT}/cmake/utils.cmake")
 include("${XAAC_ROOT}/common/common.cmake")
 include("${XAAC_ROOT}/decoder/libxaacdec.cmake")
+set(CMAKE_SYSTEM_PROCESSOR "${_JSG_SAVED_PROCESSOR}")
 set_target_properties(libxaacdec PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ─── Core ────────────────────────────────────────────────────────────────
