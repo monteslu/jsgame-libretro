@@ -30,11 +30,25 @@ export class AudioBuffer {
             this._channels.push(new Float32Array(this.length));
         }
         // If we were created from a pre-interleaved buffer (decodeAudioData),
-        // de-interleave it into the channel views now.
+        // de-interleave it into the channel views. Prefer the engine's native
+        // (SIMD in WASM) deinterleave via the AudioBuffer._deinterleave hook the
+        // platform layer installs; fall back to a JS loop if it isn't set.
         if (this._buffer) {
-            for (let frame = 0; frame < this.length; frame++) {
-                for (let ch = 0; ch < this.numberOfChannels; ch++) {
-                    this._channels[ch][frame] = this._buffer[frame * this.numberOfChannels + ch];
+            const n = this.numberOfChannels;
+            const frames = this.length;
+            if (AudioBuffer._deinterleave) {
+                // Native writes channel-concatenated planar [c0..., c1..., ...];
+                // copy each channel slice into its Float32Array view.
+                const planar = new Float32Array(frames * n);
+                AudioBuffer._deinterleave(this._buffer, planar, frames, n);
+                for (let ch = 0; ch < n; ch++) {
+                    this._channels[ch].set(planar.subarray(ch * frames, (ch + 1) * frames));
+                }
+            } else {
+                for (let frame = 0; frame < frames; frame++) {
+                    for (let ch = 0; ch < n; ch++) {
+                        this._channels[ch][frame] = this._buffer[frame * n + ch];
+                    }
                 }
             }
         }

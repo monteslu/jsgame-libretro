@@ -2,7 +2,7 @@
 // pull: the core asks for exactly sampleRate/fps frames per retro_run.
 // Modeled on WasmOfflineAudioContext (same engine, no SDL device).
 
-import { WasmAudioEngine, NativeAudioDecoders } from './NativeAudioEngine.js';
+import { WasmAudioEngine, NativeAudioDecoders, nativeDeinterleave } from './NativeAudioEngine.js';
 import { AudioDestinationNode } from './javascript/nodes/AudioDestinationNode.js';
 import { GainNode } from './javascript/nodes/GainNode.js';
 import { OscillatorNode } from './javascript/nodes/OscillatorNode.js';
@@ -20,6 +20,10 @@ import { IIRFilterNode } from './javascript/nodes/IIRFilterNode.js';
 import { PannerNode } from './javascript/nodes/PannerNode.js';
 import { ConstantSourceNode } from './javascript/nodes/ConstantSourceNode.js';
 import { AudioBuffer } from './javascript/AudioBuffer.js';
+
+// Route AudioBuffer's lazy de-interleave (getChannelData) through the engine's
+// native (SIMD/scalar) deinterleave instead of a JS per-sample loop.
+AudioBuffer._deinterleave = nativeDeinterleave;
 import { AudioListener } from './javascript/AudioListener.js';
 import { PeriodicWave } from './javascript/PeriodicWave.js';
 

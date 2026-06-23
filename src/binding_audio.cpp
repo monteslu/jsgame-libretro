@@ -27,6 +27,7 @@ void setNodeBufferId(int graph_id, int node_id, int buffer_id);
 int decodeAudio(const uint8_t* input, size_t inputSize, float** output, size_t* totalSamples, int* sampleRate);
 float* resampleAudio(const float* input, size_t inputFrames, int channels, int fromRate, int toRate, size_t* outFrames);
 void freeDecodedBuffer(float* buffer);
+void deinterleaveAudio(float* interleaved, float* planar, int frame_count, int num_channels);
 }
 
 static double argnum(napi_env env, napi_value v) {
@@ -101,6 +102,19 @@ FN(a_registerBuffer) {
   return nullptr;
 }
 FN(a_setNodeBufferId) { ARGS(3); setNodeBufferId((int)N(0), (int)N(1), (int)N(2)); return nullptr; }
+// deinterleave(interleaved: Float32Array, planar: Float32Array, frames, channels)
+// Splits interleaved [L,R,L,R,...] into channel-concatenated planar
+// [L0..Ln, R0..Rn, ...] using the engine's SIMD/scalar deinterleave (native; far
+// faster than a per-sample JS loop). The JS caller slices each channel out of
+// planar. Used by AudioBuffer.getChannelData (cold path).
+FN(a_deinterleave) {
+  ARGS(4);
+  size_t il = 0, pl = 0;
+  float* interleaved = (float*)argta(env, argv[0], &il);
+  float* planar = (float*)argta(env, argv[1], &pl);
+  if (interleaved && planar) deinterleaveAudio(interleaved, planar, (int)N(2), (int)N(3));
+  return nullptr;
+}
 
 // decode(bytes: Uint8Array, targetRate) -> Promise<{ channels, length, sampleRate, data: Float32Array }>
 //
@@ -222,6 +236,7 @@ extern "C" napi_value jsg_audio_register(napi_env env, napi_value exports) {
       {"getCurrentTime", a_getCurrentTime}, {"setCurrentTime", a_setCurrentTime},
       {"processGraph", a_processGraph}, {"setNodeBuffer", a_setNodeBuffer},
       {"registerBuffer", a_registerBuffer}, {"setNodeBufferId", a_setNodeBufferId},
+      {"deinterleave", a_deinterleave},
       {"decode", a_decode},
   };
   for (auto& f : fns) {

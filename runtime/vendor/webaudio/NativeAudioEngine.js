@@ -174,3 +174,9 @@ export const NativeAudioDecoders = {
     return { audioData: decoded.data, channels: decoded.channels, length: decoded.length, sampleRate: decoded.sampleRate };
   },
 };
+
+// Native (SIMD/scalar) interleaved→planar split, for AudioBuffer.getChannelData.
+// Splits `interleaved` into channel-concatenated `planar` ([c0..., c1..., ...]).
+export function nativeDeinterleave(interleaved, planar, frames, channels) {
+  native.deinterleave(interleaved, planar, frames, channels);
+}
