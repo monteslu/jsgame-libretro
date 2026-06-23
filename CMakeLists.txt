@@ -125,13 +125,22 @@ target_include_directories(libxaacdec PRIVATE
 # signatures that differ slightly between the scalar variants; the calls are
 # compatible at runtime but trip -Werror=incompatible-pointer-types (and MSVC's
 # equivalent). Relax it for this vendored third-party lib only.
+# CRITICAL: ixheaacd_function_selector_generic.c wraps its ENTIRE body (all the C
+# function-pointer-table globals: ixheaacd_adjust_scale, _apply_rot,
+# _calc_max_spectral_line, _aac_ld_dec_rearrange, ...) in `#if !__ARM_NEON__`. On
+# Apple Silicon AppleClang predefines __ARM_NEON__, so on macos-arm64 that file
+# compiles to NOTHING → those globals are undefined at link (linux gcc-arm doesn't
+# predefine __ARM_NEON__, which is why it linked). We use the generic C path on ALL
+# arches (no asm/NEON sources), so force the generic body to compile everywhere by
+# undefining __ARM_NEON__ for this lib.
 if(MSVC)
-    target_compile_options(libxaacdec PRIVATE /w)
+    target_compile_options(libxaacdec PRIVATE /w /U__ARM_NEON__)
 else()
     # GCC 14+/Clang make incompatible-pointer-types an error by default; downgrade
     # it (and a couple of other strict diagnostics the vendored C trips) to non-fatal
     # for this third-party lib only.
     target_compile_options(libxaacdec PRIVATE
+        -U__ARM_NEON__ -U__ARM_NEON
         -Wno-error=incompatible-pointer-types -Wno-incompatible-pointer-types
         -Wno-error=implicit-function-declaration -Wno-implicit-function-declaration -w)
 endif()
@@ -225,16 +234,9 @@ elseif(APPLE)
     if(NOT JSG_NAPI_OBJ)
         message(FATAL_ERROR "JSG_NAPI_OBJ not set (run via scripts/build.sh on macOS)")
     endif()
-    # force_load libxaacdec: its generic function-selector defines global function-
-    # pointer vars (ixheaacd_adjust_scale, _apply_rot, ...) referenced from other
-    # archive members. Apple's single-pass ld pulls members in reference order and
-    # was leaving the selector object out → "undefined symbols for arm64". Linux's
-    # --start-group handles this, so this is macOS-only. (x86 macOS happened to pull
-    # the right order; arm64 didn't — force_load makes it deterministic on both.)
     target_link_libraries(jsgame_libretro PRIVATE
         ${LIBNODE_DIR}/libnode.a pthread dl m c++
         "-Wl,-force_load,${JSG_NAPI_OBJ}"
-        "-Wl,-force_load,$<TARGET_FILE:libxaacdec>"
         ${LIBCANVAS_A}
         "-framework CoreFoundation" "-framework Security"
         "-framework SystemConfiguration" "-framework ApplicationServices")
