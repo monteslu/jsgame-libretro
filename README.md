@@ -107,7 +107,7 @@ libretro core.
 Headless verification (no frontend needed):
 
 ```bash
-cc -o test/harness test/harness.c -ldl
+cc -D_DEFAULT_SOURCE -o test/harness test/harness.c -ldl
 JSGAME_RUNTIME_DIR=$PWD/runtime ./test/harness \
   build/jsgame_libretro.so test-games/s2-demo/s2-demo.jsg 60
 ```
