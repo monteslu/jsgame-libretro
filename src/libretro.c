@@ -268,37 +268,74 @@ static void poll_pads(void) {
 
 // Pace retro_run to 60fps. Audio is produced at real wall-clock rate in JS
 // (decoupled from frame count), so this only governs VIDEO cadence — it does
-// NOT affect audio rate. Needed because the software-framebuffer present path
-// isn't throttled by the GL driver's vsync, so retro_run would free-run at
-// thousands of fps. The GL hardware-render path is driver-paced; skip it there.
+// NOT affect audio rate. Needed because neither the software-framebuffer present
+// path NOR the GL hardware-render present is reliably vsync-throttled in the
+// flatpak driver (dev_notes #2, Symptom A: observed thousands of fps on both),
+// so without a cap retro_run free-runs and object/particle spawns explode.
+// Is the FRONTEND actually throttling retro_run for us right now? We can't
+// trust the throttle MODE alone: RetroArch reports RETRO_THROTTLE_NONE
+// ("normal operation") in BOTH the genuinely-paced case (vsync on -> frames
+// arrive ~16.6ms apart) AND the not-actually-paced case (vsync off + a game
+// that emits little audio -> audio_sync never backpressures -> retro_run
+// free-runs at 1000s of fps, yet the mode is still NONE). Measured 2026-06-23:
+// vsync=false + low-audio game -> mode=NONE but ~2200fps. So a mode==NONE/VSYNC
+// stand-down double-counts: when the frontend ISN'T effectively pacing, we'd
+// stop self-pacing and the present explodes -> object/particle spawns run at
+// 30x -> freeze (dev_notes #1). The reliable signal is the MEASURED inter-frame
+// interval, not the frontend's self-report. So pace_60fps() is a FLOOR guard:
+// it sleeps only when frames are arriving FASTER than ~71fps (interval < 14ms).
+// - Frontend genuinely paces at 60 (vsync/audio_sync) -> interval ~16.6ms ->
+//   guard never sleeps -> no double-pacing, no swapchain drift (dev_notes #2,
+//   Symptom B is gone because we don't add a second sleep on top of vsync).
+// - Frontend free-runs (vsync off, no audio backpressure) -> interval <1ms ->
+//   guard trims us back to 60 so the present can't explode.
+// Audio is wall-clock based either way, so this governs only VIDEO cadence — it
+// never affects audio rate (dev_notes #1).
 static void pace_60fps(void) {
-    static double next = 0.0;
-    const double period = 1000.0 / FPS;
+    const double period = 1000.0 / FPS;        // 16.666ms target
+    // Only intervene when we're running FASTER than the target by a margin. A
+    // ~14ms floor (≈71fps) leaves headroom so a frontend pacing slightly fast
+    // of 60 (or a 60.1Hz panel) doesn't trip the guard and start fighting it.
+    const double floor_ms = 14.0;
+    static double prev = 0.0;
     double t = now_ms_dbg();
-    if (next == 0.0) { next = t + period; return; }
-    double wait = next - t;
-    // nanosleep overshoots (kernel tick granularity = several ms), so sleeping
-    // the whole 'wait' lands LONG -> ~30fps -> game runs at half speed. Sleep
-    // until ~1.5ms short of target, then busy-trim only that last ~1.5ms. The
-    // per-frame work is ~1ms with huge headroom, so a 1.5ms trim is cheap and
-    // does NOT starve the game (unlike busy-waiting the full 15ms).
-    if (wait > 2.0) {
-        sleep_ms_dbg(wait - 1.5);
+    if (prev == 0.0) { prev = t; return; }     // first frame: just anchor
+    double interval = t - prev;
+    if (interval < floor_ms) {
+        // Frames are arriving too fast — the frontend is NOT effectively pacing
+        // us. Sleep the remainder to hit the 60fps period. nanosleep overshoots
+        // (kernel tick granularity), so sleep until ~1.5ms short then busy-trim
+        // the last bit. Per-frame work is ~1ms with huge headroom, so the trim
+        // is cheap and never starves the game.
+        double target = prev + period;
+        double wait = target - now_ms_dbg();
+        if (wait > 2.0) sleep_ms_dbg(wait - 1.5);
+        while (now_ms_dbg() < target) { /* busy-trim to 60fps */ }
+        prev = target;
+        // If we've drifted way past (a hitch/pause), re-anchor so we don't burst.
+        t = now_ms_dbg();
+        if (t > prev + period) prev = t;
+    } else {
+        // Interval >= floor: the frontend is pacing us (or we're legitimately
+        // behind). Stand down — anchor to NOW so the next interval is measured
+        // from this frame, no accumulated debt.
+        prev = t;
     }
-    while (now_ms_dbg() < next) { /* trim final ~1.5ms for 60fps accuracy */ }
-    next += period;
-    t = now_ms_dbg();
-    if (t > next) next = t + period;  // resync after a hitch/pause, no burst
 }
 
 RETRO_API void retro_run(void) {
     input_poll_cb();
     poll_pads();
 
-    // Pace to 60fps for BOTH software AND GL paths. The GL hardware-render
-    // present here is NOT reliably vsync-throttled (observed 6000fps), which
-    // free-runs the game loop and lets object/particle spawns explode -> freeze.
-    // Audio is wall-clock based, so capping the frame rate doesn't affect it.
+    // Cap to 60fps. pace_60fps() is a measured-interval FLOOR guard: it sleeps
+    // ONLY when frames are arriving faster than ~71fps, so it self-disables when
+    // the frontend is already pacing us (vsync on -> frames ~16.6ms apart -> no
+    // double-pacing, no 30fps stack, dev_notes #2 Symptom B) and engages when the
+    // present would otherwise free-run to thousands of fps (vsync off / GL present
+    // not vsync-throttled, dev_notes #2 Symptom A). This is §2's "pacer made
+    // vsync-aware" — one clock, no reliance on the frontend's throttle self-report
+    // (which falsely says NONE even while free-running). Audio is wall-clock based,
+    // so this governs only VIDEO cadence — never audio rate (dev_notes #1).
     pace_60fps();
 
     // Defer the game entry until GL is actually ready (context_reset fired),
@@ -399,6 +436,20 @@ RETRO_API void retro_run(void) {
     }
 }
 
+// Frontend-driven frame time (RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK). Called
+// by the frontend right before each retro_run with the real µs elapsed since the
+// last one — EXCEPT during fast-forward / slow-motion / frame-stepping / pause,
+// when it passes the reference value (1e6/fps) instead. We forward it to the JS
+// host, which advances the game clock by this delta rather than a blind 1000/60.
+// That makes a genuine frontend stall (e.g. Vulkan resize, asset load) produce a
+// correct large dt — the game drops a frame instead of running in slow-motion —
+// while FF/pause stay deterministic because the frontend hands us the reference.
+// This is the idiomatic libretro way to get time into a core (see lutro); the
+// core never reads its own wall clock for game timing.
+static void frame_time_cb(retro_usec_t usec) {
+    jsg_host_set_frame_time_us((int64_t)usec);
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     if (!game || !game->path) return false;
 
@@ -407,6 +458,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         core_log(RETRO_LOG_ERROR, "XRGB8888 not supported by frontend");
         return false;
     }
+
+    // Ask the frontend to report per-frame elapsed time (idiomatic libretro
+    // timing). reference = ideal µs/frame; the frontend substitutes it during
+    // FF/slow-mo/pause so the game clock stays deterministic there, and reports
+    // real elapsed µs otherwise so a stall yields a correct large dt instead of
+    // slow-motion. Optional: the frontend may decline (returns false / never
+    // calls back), in which case the JS clock falls back to a fixed 1000/60 step.
+    struct retro_frame_time_callback frame_time = {
+        frame_time_cb, (retro_usec_t)(1000000.0 / FPS)
+    };
+    environ_cb(RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK, &frame_time);
 
     // GL is per-game and must be decided BEFORE bootstrap runs (the HW context
     // is requested here, in retro_load_game — by the time the game calls

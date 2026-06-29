@@ -49,6 +49,15 @@ typedef struct {
 
 void jsg_host_set_pads(const jsg_pad_t pads[4]);
 
+// Real time elapsed since the previous retro_run, in microseconds, as reported
+// by the frontend via RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK. The frontend
+// substitutes the reference value (1e6/fps) during fast-forward / slow-motion /
+// frame-stepping / pause, so the JS clock stays deterministic in those modes
+// while tracking real time during a genuine stall (idiomatic libretro timing;
+// see retro_frame_time_callback). Read by the JS shim each frame to advance the
+// game clock; 0 until the first callback fires (JS falls back to 1000/60 then).
+void jsg_host_set_frame_time_us(int64_t usec);
+
 // Enqueue a keyboard event (code/key must be static strings — the mapping
 // table in libretro.c provides them). Drained into the realm each frame.
 void jsg_host_key_event(int down, const char* code, const char* key);

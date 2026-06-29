@@ -118,6 +118,12 @@ export class WasmAudioEngine {
   registerBuffer(bufferId, bufferData, length, channels) {
     native.registerBuffer(this.graphId, bufferId, bufferData, length, channels);
   }
+  // Copy one slice [srcOff, srcOff+sliceFloats) of an interleaved buffer into the
+  // engine heap (allocates on srcOff===0). Lets the caller spread a large track's
+  // copy across frames. All offsets/lengths in FLOATS (frames*channels).
+  registerBufferChunk(bufferId, bufferData, srcOff, sliceFloats, totalFloats, frames, channels) {
+    native.registerBufferChunk(this.graphId, bufferId, bufferData, srcOff, sliceFloats, totalFloats, frames, channels);
+  }
   setNodeBufferId(nodeId, bufferId) {
     native.setNodeBufferId(this.graphId, nodeId, bufferId);
   }

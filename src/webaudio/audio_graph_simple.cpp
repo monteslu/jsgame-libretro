@@ -1117,6 +1117,34 @@ void registerBuffer(int graph_id, int buffer_id, float* buffer_data, int buffer_
     graph->buffers[buffer_id] = bd;
 }
 
+// Incremental registration: copy ONE slice [src_off, src_off+slice_floats) of a
+// buffer's interleaved PCM into the engine heap, allocating on the first slice.
+// Lets the JS layer split a multi-minute track's ~125MB copy across frames so no
+// single frame eats 12-26ms (the startup-hitch fix). The buffer is only usable
+// once the final slice has landed; the JS side gates first-play on completion.
+// src_off / slice_floats / total_floats are in FLOATS (frames*channels).
+void registerBufferChunk(int graph_id, int buffer_id, float* src, int src_off,
+                         int slice_floats, int total_floats, int buffer_frames,
+                         int buffer_channels) {
+    auto it = graphs.find(graph_id);
+    if (it == graphs.end()) return;
+    AudioGraph* graph = it->second;
+    if (!src || total_floats <= 0 || buffer_channels <= 0) return;
+    if (src_off < 0 || slice_floats <= 0) return;
+    if ((size_t)src_off + (size_t)slice_floats > (size_t)total_floats) return;
+
+    BufferData& bd = graph->buffers[buffer_id];
+    if (src_off == 0) {
+        // First slice: (re)allocate the destination. Free any prior buffer here.
+        if (bd.data) free(bd.data);
+        bd.data = (float*)malloc((size_t)total_floats * sizeof(float));
+        bd.frames = buffer_frames;
+        bd.channels = buffer_channels;
+    }
+    if (!bd.data) return;  // alloc failed on first slice
+    memcpy(bd.data + src_off, src, (size_t)slice_floats * sizeof(float));
+}
+
 EMSCRIPTEN_KEEPALIVE
 void setNodeBufferId(int graph_id, int node_id, int buffer_id) {
     auto it = graphs.find(graph_id);

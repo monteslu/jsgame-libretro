@@ -73,6 +73,12 @@ static unsigned g_gpu_scene = 0, g_gpu_hud = 0;
 
 static jsg_pad_t g_pads[4];
 
+// Frontend-reported real µs since the previous retro_run (SET_FRAME_TIME_CALLBACK).
+// Single int64 written from retro_run's frame_time callback, read on the JS
+// thread inside fireFrame — both on the libretro thread, so no lock needed.
+// 0 means "no callback yet"; the JS shim falls back to the fixed step then.
+static int64_t g_frame_time_us = 0;
+
 // Keyboard event queue (core enqueues from RETRO_KEYBOARD_CALLBACK; drained
 // into the realm's dispatchKey each frame).
 struct jsg_key_ev { int down; const char* code; const char* key; };
@@ -230,6 +236,16 @@ static napi_value io_get_pads(napi_env env, napi_callback_info info) {
   return ta;
 }
 
+// frameTimeMs() -> number: real ms since the previous retro_run, per the
+// frontend's SET_FRAME_TIME_CALLBACK (reference value during FF/slow-mo/pause).
+// 0 before the first callback — the JS shim falls back to the fixed 1000/60 step.
+static napi_value io_frame_time_ms(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value out;
+  napi_create_double(env, (double)g_frame_time_us / 1000.0, &out);
+  return out;
+}
+
 // pushAudio(samples: Int16Array) — interleaved stereo for THIS video frame
 static napi_value io_push_audio(napi_env env, napi_callback_info info) {
   size_t argc = 1;
@@ -304,6 +320,8 @@ static napi_value io_register(napi_env env, napi_value exports) {
   napi_set_named_property(env, exports, "log", fn);
   napi_create_function(env, "getPads", NAPI_AUTO_LENGTH, io_get_pads, nullptr, &fn);
   napi_set_named_property(env, exports, "getPads", fn);
+  napi_create_function(env, "frameTimeMs", NAPI_AUTO_LENGTH, io_frame_time_ms, nullptr, &fn);
+  napi_set_named_property(env, exports, "frameTimeMs", fn);
   napi_create_function(env, "sramRead", NAPI_AUTO_LENGTH, io_sram_read, nullptr, &fn);
   napi_set_named_property(env, exports, "sramRead", fn);
   napi_create_function(env, "sramWrite", NAPI_AUTO_LENGTH, io_sram_write, nullptr, &fn);
@@ -580,6 +598,11 @@ extern "C" void jsg_host_key_event(int down, const char* code, const char* key) 
 extern "C" void jsg_host_set_pads(const jsg_pad_t pads[4]) {
   memcpy(g_pads, pads, sizeof(g_pads));
 }
+
+extern "C" void jsg_host_set_frame_time_us(int64_t usec) {
+  g_frame_time_us = usec;
+}
+
 
 extern "C" void jsg_host_set_audio_backpressure(bool enable) {
   std::lock_guard<std::mutex> lk(g_audio_mtx);

@@ -30,6 +30,51 @@ audio_latency, or `audio_sync`. Those are red herrings — we tried them all, th
 bug was always the fixed-per-frame production. The driver/latency don't matter
 once audio is wall-clock based.
 
+### 1a. Phantom-time guard — cap elapsedMs so a frontend BLOCK can't run away
+
+**This REFINES §1; it does NOT weaken it.** §1's invariant is unchanged: over
+time, audio produced = real-elapsed-seconds × 48000, via `elapsedMs * 48 + carry`.
+The steady-state model is sacred. What 1a fixes is a pathological *input* to it.
+
+**Symptom (measured on Bazzite 2026-06-28):** with RetroArch's `audio_sync=true`
+(its default), a slow startup made the game lock to ~45fps for ~16s, or — before
+this whole fix chain — freeze ~10s, before reaching 60fps. fps never recovered
+until a backlog drained.
+
+**Root cause — a feedback loop, NOT a §1 violation:** under `audio_sync`, RA
+*blocks our core inside `audio_batch_cb`* when its audio buffer is full (it does
+this AFTER `__jsg_frame` returns, in C, so the block lands inside the NEXT frame's
+`elapsedMs = t1 - prevT1` measurement). §1 then faithfully produces audio for that
+inflated elapsed → a bigger burst → RA blocks LONGER → elapsedMs inflates more →
+runaway, until the backlog finally drains at the device's fixed 48kHz. The trap:
+**during the block the game did NOT run and NO audio was missed** (the device was
+busy draining a full buffer), so counting block-time as game-elapsed manufactures
+phantom audio.
+
+**The fix (`runtime/bootstrap.js`, in §1's own elapsedMs computation):** cap
+`elapsedMs` at **2 video frames (33.3ms)** and DISCARD the excess (don't carry it
+— it's phantom frontend-block time, not missed game time; carrying would just
+rebuild the backlog). Why this is §1-safe:
+- At 60fps, elapsed ≈16.6ms ≪ cap → the branch **never fires**. Steady state
+  untouched.
+- Normal sub-30fps jitter (≤33ms) is under the cap and fully preserved via the
+  `audioDebt` carry.
+- Only a frame >33ms is trimmed — and on otherwise-idle hardware (`cb`≈0.4ms) a
+  >33ms `retro_run` interval can ONLY be a frontend block, never real game work.
+- §1 ALREADY clamps production (`1..4096`); this is a tighter, smarter ceiling on
+  the same clamp, not a foreign concept.
+- Verified: harness audio_sync repro went 310ms→0ms of block with the guard, and
+  `maxjump` (audio discontinuity) was identical to baseline — zero choppiness.
+
+**Dead ends we ruled out (don't retry):** (1) driving audio off the frontend's
+`SET_FRAME_TIME_CALLBACK` delta instead of wall-clock — RA samples that delta at
+the TOP of its runloop so it INCLUDES the block (verified in RetroArch
+`runloop.c`); frameMs ≈ wall-clock, so it changes nothing. (2) Capping per-call
+*delivery* to RA's free buffer space via `SET_AUDIO_BUFFER_STATUS_CALLBACK` — it
+treats the symptom (bursts) not the disease (over-production); it converted the
+10s freeze into a metastable ~45fps oscillation. The elapsedMs cap is the root
+fix; both dead ends were reverted.
+
 **Async vs sync audio callback:** `SET_AUDIO_CALLBACK` (async) busy-spins on
 Android-style frontends — the audio thread calls our callback **~23M times/sec**,
 almost always on an empty ring, starving playback AND stealing CPU. We default to
@@ -54,9 +99,27 @@ wall-clock based (gotcha #1) — capping the frame rate does not affect audio.
 
 **Symptom B — game runs at exactly 30fps / half speed:** **double-pacing.** If
 RetroArch's `video_vsync = true` AND our `pace_60fps()` both throttle, they
-stack → 30fps. The core pacer is the single clock; RA vsync should be off for
-this core (or the pacer made vsync-aware). `fps(real)` reading 60→30→15 jitter
-is the fingerprint.
+stack → 30fps. The core pacer must be the single clock. `fps(real)` reading
+60→30→15 jitter is the fingerprint.
+
+**How the pacer avoids stacking (the "vsync-aware" pacer, 2026-06-23):**
+`pace_60fps()` is a **measured-interval FLOOR guard**, not an unconditional
+sleep. Each call it measures the wall-clock interval since the previous frame and
+sleeps to the 60fps period **only when that interval is < ~14ms** (i.e. we're
+running faster than ~71fps). So:
+- vsync ON → frames already arrive ~16.6ms apart → interval ≥ floor → guard
+  sleeps **nothing** → no stack, no 30fps (Symptom B gone by construction; we
+  never add a second sleep on top of vsync).
+- vsync OFF / GL present free-running → interval <1ms → guard trims back to 60.
+
+**Rejected approach — do NOT bring back `GET_THROTTLE_STATE`:** an earlier WIP
+asked the frontend `RETRO_ENVIRONMENT_GET_THROTTLE_STATE` and stood down when it
+reported `VSYNC`/`NONE`. **This is unreliable: RetroArch reports
+`RETRO_THROTTLE_NONE` even when it is NOT effectively pacing us** (measured:
+`video_vsync=false` + a game that emits little audio → `audio_sync` never
+backpressures → ~2200fps, yet mode=`NONE`). Trusting the mode made the core stand
+down while free-running → present explosion. The measured inter-frame interval is
+the only trustworthy signal; the floor guard uses it and needs no env call.
 
 **Symptom C — game feels slow but `timing/600f` shows cb<2ms, slow=0:** the work
 is fast; the *pacer* is over-sleeping. `nanosleep` overshoots (kernel tick
@@ -70,10 +133,81 @@ The pacer sleeps until ~1.5ms short, then busy-trims the last ~1.5ms.
 
 A game that does `ship.x += 6.5` moves at half speed at 30fps. Correct games
 multiply by `dt` (delta seconds): `ship.x += speed_px_per_sec * dt`, timers in
-seconds. The rAF timestamp is a **synthetic clock** (`now += 1000/60` in
-realm.js), so `dt` derived from it is steady — but games should still be written
-delta-time-correct (and clamp `dt` to avoid teleport on a hitch/pause).
-See `test-games/star-catcher/main.js` for the reference pattern.
+seconds. See `test-games/star-catcher/main.js` for the reference pattern.
+
+**The game clock tracks frontend frame time, not a blind fixed step
+(2026-06-25).** `realm.js` advances its synthetic `now` by the per-frame delta
+the frontend reports via `RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK` (env #21),
+NOT a blind `now += 1000/60`. This is the idiomatic libretro way to get time
+into a core (lutro does the same) — the core must NEVER read its own wall clock
+for game timing. Why it matters:
+- **A blind `+= 1000/60` causes slow-motion, not frame drops.** If `retro_run`
+  is called slowly (Vulkan resize, asset load, any frontend stall), a fixed step
+  advances the game clock by only 16.6ms while ~33ms really passed → `dt` is
+  wrong → ships crawl. Observed on Bazzite at startup: several seconds of
+  slow-motion, not just an fps dip. The frame-time callback feeds the REAL
+  elapsed time, so a slow frame yields a correct large `dt` and the game drops a
+  frame instead of slowing down.
+- **Determinism / FF / pause are preserved BY THE FRONTEND, not us.** During
+  fast-forward, slow-motion, frame-stepping or pause, the frontend substitutes
+  the *reference* value (`1e6/fps`) instead of real time — so the clock stays
+  deterministic in those modes without the core detecting them. Do NOT try to
+  detect FF/pause yourself or read `performance.now()` for the clock; that's
+  what the callback handles.
+
+**Plumbing:** `frame_time_cb` (libretro.c) → `jsg_host_set_frame_time_us` →
+`io.frameTimeMs()` (node_host.cpp) → `fireFrame(pads, frameMs)` (bootstrap.js) →
+`now += min(frameMs, 4*16.6)` (realm.js). The step is **clamped to 4 frames** so
+a long hitch/resume can't teleport a dt-correct game. **Fallback:** if the
+frontend never registers the callback (`frameMs <= 0`, e.g. the headless
+harness's default), `fireFrame` reverts to the fixed `1000/60` step — so games
+still run without a frame-time-providing frontend. Games should still clamp their
+own `dt` defensively. (The harness now drives this callback too — it feeds real
+µs since the last `retro_run`, so `JSGAME_PACE_MS=33` reproduces the stall and
+the clock correctly tracks ~33ms/frame; see the clock-probe test pattern.)
+
+### 3a. Decoded-audio registration must be DEFERRED + CHUNKED off the boot frames
+
+**Symptom (Bazzite 2026-06-28):** after the §1a and §3 fixes, a music-heavy game
+(`space`: 8 OGG tracks, ~22MB → ~150MB PCM) still had a ~2.5s patch of isolated
+slow frames (20-47ms) at startup, even though fps read 60.
+
+**Root cause — main-thread PCM copy, not decode.** OGG decode is already async on
+libuv's threadpool (`binding_audio.cpp` `napi_create_async_work`) and the result
+crosses to JS zero-copy (external ArrayBuffer) — that part is fine, leave it. The
+cost is `registerBuffer` (`audio_graph_simple.cpp`): a `malloc` + full `memcpy` of
+the interleaved PCM into the ENGINE heap so the mixer can read it. For a
+multi-minute track that's ~125MB = **12–26ms of MAIN-THREAD work**, and the game
+decodes all 8 at boot, so the copies bunched onto a handful of frames → visible
+hitching (one was 47ms = a 3-frame drop).
+
+**The fix (two parts, `LibretroAudioContext.js` + `audio_graph_simple.cpp`):**
+1. **Defer, don't register inline.** `decodeAudioData` ENQUEUES the buffer instead
+   of registering it immediately. `_drainRegistrationQueue()` (called once per
+   tick from `pullFrames`) processes the queue. Spreading 8 tracks over 8 frames
+   un-bunches the burst.
+2. **Chunk a single big track too.** One 125MB copy alone still blows a 16ms
+   frame, so the drain copies only **~512K floats (~2MB, ~1-2ms) per tick** via
+   the incremental native `registerBufferChunk(id, data, srcOff, sliceFloats,
+   totalFloats, …)` — `malloc` on the first slice (`srcOff===0`), `memcpy` the
+   slice, mark the buffer registered only when the LAST slice lands.
+
+**Safety invariants (do not break):**
+- A buffer played BEFORE its slices finish must still work: `start()`
+  (`AudioBufferSourceNode.js`) lazily does a full `registerBuffer` on the SAME
+  dedupe key + Set the drain checks. So the drain skips (`has(key)` → shift) any
+  buffer `start()` already registered — no double-copy, no half-copied buffer ever
+  played. Music doesn't play in the first second anyway, so this lazy fallback is
+  rare.
+- `registerBufferChunk` with `srcOff===0` frees any prior buffer and re-allocs;
+  the `has(key)` guard ensures it never runs after a full lazy registration
+  completed for that id.
+
+**Result:** flat 60fps from boot, `slow(>16ms)=0` in the first 600-frame window;
+the only residual is ~1-2 isolated boot frames (one is RA's one-time Vulkan
+swapchain resize to the display res — frontend-owned, `gapMax`≈49ms while our
+`cb`/`present`≈0.5ms — not ours to fix). Audio output is byte-identical to before
+(`maxjump` unchanged across all test games).
 
 ---
 

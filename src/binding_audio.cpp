@@ -23,6 +23,7 @@ double getGraphCurrentTime(int graph_id);
 void setGraphCurrentTime(int graph_id, double time);
 void setNodeBuffer(int graph_id, int node_id, float* data, int frames, int channels);
 void registerBuffer(int graph_id, int buffer_id, float* data, int frames, int channels);
+void registerBufferChunk(int graph_id, int buffer_id, float* src, int src_off, int slice_floats, int total_floats, int frames, int channels);
 void setNodeBufferId(int graph_id, int node_id, int buffer_id);
 int decodeAudio(const uint8_t* input, size_t inputSize, float** output, size_t* totalSamples, int* sampleRate);
 float* resampleAudio(const float* input, size_t inputFrames, int channels, int fromRate, int toRate, size_t* outFrames);
@@ -99,6 +100,16 @@ FN(a_registerBuffer) {
   size_t len = 0;
   float* data = (float*)argta(env, argv[2], &len);
   if (data) registerBuffer((int)N(0), (int)N(1), data, (int)N(3), (int)N(4));
+  return nullptr;
+}
+// registerBufferChunk(graph, id, fullData: Float32Array, srcOff, sliceFloats,
+//                      totalFloats, frames, channels)
+FN(a_registerBufferChunk) {
+  ARGS(8);
+  size_t len = 0;
+  float* data = (float*)argta(env, argv[2], &len);
+  if (data) registerBufferChunk((int)N(0), (int)N(1), data, (int)N(3), (int)N(4),
+                                (int)N(5), (int)N(6), (int)N(7));
   return nullptr;
 }
 FN(a_setNodeBufferId) { ARGS(3); setNodeBufferId((int)N(0), (int)N(1), (int)N(2)); return nullptr; }
@@ -235,7 +246,8 @@ extern "C" napi_value jsg_audio_register(napi_env env, napi_value exports) {
       {"scheduleParamEvent", a_scheduleParamEvent},
       {"getCurrentTime", a_getCurrentTime}, {"setCurrentTime", a_setCurrentTime},
       {"processGraph", a_processGraph}, {"setNodeBuffer", a_setNodeBuffer},
-      {"registerBuffer", a_registerBuffer}, {"setNodeBufferId", a_setNodeBufferId},
+      {"registerBuffer", a_registerBuffer}, {"registerBufferChunk", a_registerBufferChunk},
+      {"setNodeBufferId", a_setNodeBufferId},
       {"deinterleave", a_deinterleave},
       {"decode", a_decode},
   };

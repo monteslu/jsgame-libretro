@@ -52,7 +52,8 @@ function buildSession(contentPath) {
 
   // per-game frame + audio clock state (reset each session)
   return { content, realm, entry, begun: false, frame: 0, audioClockMs: 0, audioDebt: 0,
-           tCb: 0, tAudio: 0, tPresent: 0, tMax: 0, slowFrames: 0 };
+           tCb: 0, tAudio: 0, tPresent: 0, tMax: 0, slowFrames: 0,
+           tGap: 0, gapMax: 0, gapLong: 0, lastEnd: 0 };
 }
 
 function startSession(contentPath) {
@@ -112,13 +113,41 @@ globalThis.__jsg_frame = () => {
   s.frame++;
   const realm = s.realm;
   const t0 = hostPerf.now();
-  realm.fireFrame(io.getPads());
+  // Advance the game clock by the frontend-reported frame time (idiomatic
+  // libretro: the frontend feeds real elapsed ms, but the reference 1000/60
+  // during FF/slow-mo/pause so those stay deterministic). 0 = frontend didn't
+  // register the callback -> fireFrame falls back to a fixed 1000/60 step.
+  const frameMs = io.frameTimeMs ? io.frameTimeMs() : 0;
+  realm.fireFrame(io.getPads(), frameMs);
   const t1 = hostPerf.now();
 
   // How many audio frames does real elapsed time call for this tick?
+  // §1 (dev_notes): nFrames = elapsedMs * 48 with a fractional audioDebt carry —
+  // audio rate tracks REAL elapsed wall-clock time, decoupled from fps, driftless.
+  // THE STEADY-STATE MODEL IS UNCHANGED — it is the hard-won §1 victory.
   if (s.audioClockMs === 0) s.audioClockMs = t1;
-  const elapsedMs = t1 - s.audioClockMs;
+  let elapsedMs = t1 - s.audioClockMs;
   s.audioClockMs = t1;
+
+  // PHANTOM-TIME GUARD (startup feedback-loop fix). §1 assumes elapsedMs is time
+  // the GAME ran. But under audio_sync=true the frontend BLOCKS our core inside
+  // audio_batch_cb (AFTER this fn returns, in C) when its audio buffer is full —
+  // and that block lands inside the NEXT frame's elapsedMs. During that block the
+  // game did NOT run and NO audio was missed (the device was busy draining a full
+  // buffer). Counting it as elapsed makes §1 produce audio for time the game was
+  // frozen → a backlog that can only drain at 48kHz realtime → RA throttles us to
+  // ~45fps for ~16s while it drains → and the throttle re-inflates elapsedMs →
+  // metastable. So: cap elapsedMs at 2 video frames and DISCARD the excess (it is
+  // phantom frontend-block time, not missed game time — carrying it would just
+  // rebuild the backlog). This does NOT touch §1 steady state: at 60fps elapsed
+  // ≈16.6ms << cap so the branch never fires; normal <30fps jitter (≤33ms) is
+  // under the cap and fully preserved via the audioDebt carry below. Only a
+  // frontend-block-inflated frame (>33ms, which on idle hardware can ONLY be a
+  // block — cb is ~0.4ms) is trimmed. The reference is the frontend's own
+  // frame-time when available (frameMs), else the 2-frame constant.
+  const audioCapMs = 2 * (1000 / 60);         // 33.3ms — one frame of legit slack
+  if (elapsedMs > audioCapMs) elapsedMs = audioCapMs;  // drop phantom block-time
+
   let want = elapsedMs * (SAMPLE_RATE / 1000) + s.audioDebt;
   let nFrames = Math.floor(want);
   s.audioDebt = want - nFrames;
@@ -160,6 +189,19 @@ globalThis.__jsg_frame = () => {
   const total = t3 - t0;
   if (total > s.tMax) s.tMax = total;
   if (total > 16) s.slowFrames++;
+
+  // GAP: wall-clock from the END of the previous frame to the START of this one
+  // — i.e. how long the FRONTEND blocked us between retro_run calls (audio
+  // backpressure / vsync). If the dips live here (gap big while our work is
+  // tiny), the stall is the frontend pacing us, not our code. This is the number
+  // none of the cb/audio/present timers can see. (t0 was captured at fn entry.)
+  if (s.lastEnd) {
+    const gap = t0 - s.lastEnd;
+    s.tGap += gap;
+    if (gap > s.gapMax) s.gapMax = gap;
+    if (gap > 20) s.gapLong = (s.gapLong || 0) + 1;
+  }
+  s.lastEnd = t3;
   if (s.frame % 120 === 0) {
     const nowMs = Date.now();
     if (!globalThis.__lastWall) globalThis.__lastWall = nowMs - 2000;
@@ -169,8 +211,10 @@ globalThis.__jsg_frame = () => {
   }
   if (s.frame % 600 === 0) {
     log(`timing/600f: cb=${(s.tCb / 600).toFixed(2)}ms audio=${(s.tAudio / 600).toFixed(2)}ms ` +
-        `present=${(s.tPresent / 600).toFixed(2)}ms max=${s.tMax.toFixed(1)}ms slow(>16ms)=${s.slowFrames}`);
+        `present=${(s.tPresent / 600).toFixed(2)}ms max=${s.tMax.toFixed(1)}ms slow(>16ms)=${s.slowFrames} ` +
+        `| gap(avg)=${(s.tGap / 600).toFixed(2)}ms gapMax=${s.gapMax.toFixed(1)}ms gapLong(>20ms)=${s.gapLong || 0}`);
     s.tCb = s.tAudio = s.tPresent = s.tMax = 0; s.slowFrames = 0;
+    s.tGap = 0; s.gapMax = 0; s.gapLong = 0;
   }
 
   if (s.frame === Number(process.env.JSGAME_DUMP_FRAME || 0) && process.env.JSGAME_DUMP_PNG) {

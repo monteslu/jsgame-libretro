@@ -779,9 +779,17 @@ function buildRealm({ content, io, canvasLib, width, height, log, logErr, netPol
       const mod = loadModule(entryPath);
       await linkAndEvaluate(mod);
     },
-    fireFrame(int32Pads) {
+    fireFrame(int32Pads, frameMs) {
       if (stopped) return;
-      now += 1000 / 60;
+      // Advance the synthetic clock by the frontend-reported frame time so a
+      // genuine stall (slow retro_run call rate) produces a correct large dt and
+      // the game DROPS a frame instead of running in slow-motion. The frontend
+      // already hands us the reference (1000/60) during FF/slow-mo/pause, so
+      // those stay deterministic without us detecting the mode. Clamp to 4 frames
+      // (~67ms) so a long hitch/resume can't teleport a dt-correct game; fall
+      // back to the fixed step when the frontend didn't provide a frame time
+      // (frameMs <= 0 -> callback unregistered, e.g. the headless harness).
+      now += (frameMs > 0) ? Math.min(frameMs, (1000 / 60) * 4) : (1000 / 60);
       padSnapshot = int32Pads;
       // Bind the frontend's (live) default framebuffer before the game's frame.
       // Libraries like Three.js render to "the canvas" assuming the default

@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../src/libretro.h"
@@ -43,6 +44,9 @@ static const uint32_t* g_fb;
 static unsigned g_fb_w, g_fb_h;
 static size_t g_audio_frames;
 static retro_keyboard_event_t g_kbcb;
+static retro_frame_time_callback_t g_frame_time_cb = NULL;
+static retro_usec_t g_frame_time_ref = 0;
+static double g_sim_buf_level = 0.0;   /* JSGAME_AUDIO_SYNC sim: frontend buffer fill (frames) */
 
 static void log_printf(enum retro_log_level level, const char* fmt, ...) {
     va_list va;
@@ -62,6 +66,12 @@ static bool env_cb(unsigned cmd, void* data) {
         case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK:
             g_kbcb = ((struct retro_keyboard_callback*)data)->callback;
             return true;
+        case RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK: {
+            struct retro_frame_time_callback* f = data;
+            g_frame_time_cb = f->callback;
+            g_frame_time_ref = f->reference;
+            return true;
+        }
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
             return true;
 #ifdef JSG_GL
@@ -121,6 +131,27 @@ static size_t audio_batch_cb(const int16_t* data, size_t frames) {
         g_last_l = l;
     }
     g_audio_frames += frames;
+    // JSGAME_AUDIO_SYNC=N: emulate RetroArch's audio_sync=true. Model a buffer of
+    // N frames that drains at 48000/sec; BLOCK (like RA) when this delivery would
+    // overflow it. This reproduces the Bazzite startup feedback loop locally so
+    // the wall-clock-vs-frametime audio fix can be verified without a device run.
+    static int sync_buf = -1;
+    static double last_ms = 0.0;
+    if (sync_buf < 0) { const char* e = getenv("JSGAME_AUDIO_SYNC"); sync_buf = e ? atoi(e) : 0; }
+    if (sync_buf > 0) {
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+        double now = t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
+        if (last_ms == 0.0) last_ms = now;
+        g_sim_buf_level -= (now - last_ms) * (48000.0 / 1000.0);  // drain since last call
+        if (g_sim_buf_level < 0) g_sim_buf_level = 0;
+        last_ms = now;
+        g_sim_buf_level += frames;                        // our delivery
+        if (g_sim_buf_level > sync_buf) {                 // buffer full -> RA blocks
+            double over = g_sim_buf_level - sync_buf;
+            usleep((useconds_t)(over / 48000.0 * 1e6));   // wait for it to drain
+            g_sim_buf_level = sync_buf;
+        }
+    }
     return frames;
 }
 
@@ -207,12 +238,28 @@ int main(int argc, char** argv) {
     if (dump) g_dump = fopen(dump, "wb");
     int pace_us = getenv("JSGAME_PACE_MS") ? atoi(getenv("JSGAME_PACE_MS")) * 1000 : 0;
     int reset_at = getenv("JSGAME_TEST_RESET") ? atoi(getenv("JSGAME_TEST_RESET")) : -1;
+    // JSGAME_SEED_STALL_MS=N,K: make the first K frames each take ~N ms (simulates
+    // a slow startup — OGG decode etc. — that SEEDS the audio_sync feedback loop).
+    int seed_ms = 0, seed_n = 0;
+    { const char* e = getenv("JSGAME_SEED_STALL_MS");
+      if (e) { seed_ms = atoi(e); const char* c = strchr(e, ','); seed_n = c ? atoi(c + 1) : 15; } }
+    struct timespec prev_ts; clock_gettime(CLOCK_MONOTONIC, &prev_ts);
     for (int i = 0; i < frames; i++) {
         if (g_kbcb && i == 5) g_kbcb(true, 97, 'a', 0);   /* press 'a' */
         if (g_kbcb && i == 10) g_kbcb(false, 97, 'a', 0); /* release */
         if (i == reset_at) { fprintf(stderr, "[harness] retro_reset() at frame %d\n", i); retro_reset(); }
+        // Emulate a frontend's SET_FRAME_TIME_CALLBACK: feed real µs since the
+        // previous retro_run before each call (first frame uses the reference).
+        if (g_frame_time_cb) {
+            struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+            retro_usec_t us = (retro_usec_t)((t.tv_sec - prev_ts.tv_sec) * 1000000LL
+                              + (t.tv_nsec - prev_ts.tv_nsec) / 1000LL);
+            prev_ts = t;
+            g_frame_time_cb(i == 0 ? g_frame_time_ref : us);
+        }
         retro_run();
         if (pace_us) usleep(pace_us);
+        if (seed_ms && i < seed_n) usleep(seed_ms * 1000);  // seed the startup stall
     }
     if (g_dump) fclose(g_dump);
 #ifdef JSG_GL
