@@ -10,6 +10,8 @@
 #include "node_host.h"
 #include "embedded_runtime.h"
 #include "gl_detect.h"
+#include <GLES3/gl3.h>
+#include "gl/gl_procs.h"   // glXxx -> p_glXxx from the frontend's get_proc_address
 
 // gl_blit.c — software-framebuffer -> GL texture -> frontend FBO (for WebGL
 // games that composite their final image onto a 2D display canvas).
@@ -74,7 +76,102 @@ static void sleep_ms_dbg(double ms){
 #endif
 static int16_t silence[(int)(AUDIO_RATE / FPS) * 2];
 
+// ─── Game GL state isolation ─────────────────────────────────────────────
+// RetroArch's own present pass (gl2 driver) draws with client-side vertex
+// attributes and disables them afterwards, and it binds NO VAO of its own. So
+// whatever VAO the game left bound gets mutated between frames: a game that
+// sets up its VAO once and just draws every frame (test-games/gl-test) lost its
+// attribute array after frame 0 on Batocera/Pi5 (Mesa V3D) -- clear colour
+// only, no triangle. Same class of bug wasmcart-libretro hit. Cure: after the
+// game's frame, remember its state and hand RetroArch a neutral context (VAO 0,
+// program 0, no tests); put the game's state back before its next frame.
+typedef struct {
+    GLint program, vao, fbo, active_tex, tex_2d, array_buf, elem_buf;
+    GLint viewport[4];
+    GLboolean blend, depth_test, scissor_test, stencil_test, cull_face, dither;
+    GLint blend_src_rgb, blend_dst_rgb, blend_src_a, blend_dst_a, blend_eq_rgb, blend_eq_a;
+    GLboolean depth_mask, color_mask[4];
+    GLint stencil_mask;
+    GLfloat clear_color[4];
+    bool saved;
+} game_gl_state_t;
+static game_gl_state_t game_gl = {0};
+
+static void game_gl_save(void) {
+    glGetIntegerv(GL_CURRENT_PROGRAM, &game_gl.program);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &game_gl.vao);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &game_gl.fbo);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &game_gl.active_tex);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &game_gl.tex_2d);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &game_gl.array_buf);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &game_gl.elem_buf);
+    glGetIntegerv(GL_VIEWPORT, game_gl.viewport);
+    game_gl.blend        = glIsEnabled(GL_BLEND);
+    game_gl.depth_test   = glIsEnabled(GL_DEPTH_TEST);
+    game_gl.scissor_test = glIsEnabled(GL_SCISSOR_TEST);
+    game_gl.stencil_test = glIsEnabled(GL_STENCIL_TEST);
+    game_gl.cull_face    = glIsEnabled(GL_CULL_FACE);
+    game_gl.dither       = glIsEnabled(GL_DITHER);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &game_gl.blend_src_rgb);
+    glGetIntegerv(GL_BLEND_DST_RGB, &game_gl.blend_dst_rgb);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &game_gl.blend_src_a);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &game_gl.blend_dst_a);
+    glGetIntegerv(GL_BLEND_EQUATION_RGB, &game_gl.blend_eq_rgb);
+    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &game_gl.blend_eq_a);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &game_gl.depth_mask);
+    glGetBooleanv(GL_COLOR_WRITEMASK, game_gl.color_mask);
+    glGetIntegerv(GL_STENCIL_WRITEMASK, &game_gl.stencil_mask);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, game_gl.clear_color);
+    game_gl.saved = true;
+}
+
+static void game_gl_restore(void) {
+    if (!game_gl.saved) return;
+    glUseProgram((GLuint)game_gl.program);
+    glBindVertexArray((GLuint)game_gl.vao);   // brings its element-buffer binding back
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)game_gl.fbo);
+    glActiveTexture((GLenum)game_gl.active_tex);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)game_gl.tex_2d);
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)game_gl.array_buf);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, (GLuint)game_gl.elem_buf);
+    glViewport(game_gl.viewport[0], game_gl.viewport[1], game_gl.viewport[2], game_gl.viewport[3]);
+    if (game_gl.blend)        glEnable(GL_BLEND);        else glDisable(GL_BLEND);
+    if (game_gl.depth_test)   glEnable(GL_DEPTH_TEST);   else glDisable(GL_DEPTH_TEST);
+    if (game_gl.scissor_test) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+    if (game_gl.stencil_test) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
+    if (game_gl.cull_face)    glEnable(GL_CULL_FACE);    else glDisable(GL_CULL_FACE);
+    if (game_gl.dither)       glEnable(GL_DITHER);       else glDisable(GL_DITHER);
+    glBlendFuncSeparate((GLenum)game_gl.blend_src_rgb, (GLenum)game_gl.blend_dst_rgb,
+                        (GLenum)game_gl.blend_src_a,   (GLenum)game_gl.blend_dst_a);
+    glBlendEquationSeparate((GLenum)game_gl.blend_eq_rgb, (GLenum)game_gl.blend_eq_a);
+    glDepthMask(game_gl.depth_mask);
+    glColorMask(game_gl.color_mask[0], game_gl.color_mask[1], game_gl.color_mask[2], game_gl.color_mask[3]);
+    glStencilMask((GLuint)game_gl.stencil_mask);
+    glClearColor(game_gl.clear_color[0], game_gl.clear_color[1], game_gl.clear_color[2], game_gl.clear_color[3]);
+}
+
+// Neutral state for RetroArch's present pass (and our own blits): nothing of
+// the game's is bound, so nothing of the game's can be clobbered.
+static void game_gl_neutral(void) {
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glDisable(GL_DITHER);
+    glBlendFunc(GL_ONE, GL_ZERO);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glStencilMask(0xFF);
+    glActiveTexture(GL_TEXTURE0);
+}
+
 static void context_reset(void) {
+    game_gl.saved = false;   // a fresh context has none of the old objects
     jsg_gl_set_procs((void*)hw_render.get_proc_address,
                      (uintptr_t)hw_render.get_current_framebuffer());
     // RetroArch's default FBO can change per frame — give the GL binding the
@@ -349,7 +446,10 @@ RETRO_API void retro_run(void) {
         }
     }
 
+    bool gl_live = gl_active && jsg_gl_ready();
+    if (gl_live) game_gl_restore();
     jsg_host_frame();
+    if (gl_live) { game_gl_save(); game_gl_neutral(); }
 
     // Present the HW framebuffer only when the GL context is live AND the
     // game's DISPLAY canvas is the GL one. A game can render GL into an
@@ -389,6 +489,7 @@ RETRO_API void retro_run(void) {
             // (N32=BGRA), alpha-blended on top with swizzle.
             jsg_gl_blit_texture(scene_tex, (int)gw, (int)gh, curfb);
             if (hud) jsg_gl_blit_overlay(hud, (int)gw, (int)gh, curfb, 0);
+            game_gl_neutral();
             video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
             if (!async_audio) {
                 const int16_t* gs = NULL;
@@ -419,6 +520,7 @@ RETRO_API void retro_run(void) {
     if (gl_active && jsg_gl_ready() && gl_blit_ready && fb) {
         jsg_gl_blit_present(fb, (int)w, (int)h,
                             (unsigned)hw_render.get_current_framebuffer());
+        game_gl_neutral();
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, cur_width, cur_height, 0);
     }
     // Path C: pure software (no GL at all). Present the raster directly.
@@ -519,6 +621,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             hw_render.depth           = true;
             hw_render.stencil         = true;
             hw_render.bottom_left_origin = true;
+            // Keep the context across video reinits (fullscreen toggle etc.):
+            // the game's GL objects live in it and cannot be recreated.
+            hw_render.cache_context = true;
             if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
                 gl_active = true;
                 gl_is_gles = !tries[i].desktop;   // for the blit shader dialect
